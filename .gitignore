@@ -205,3 +205,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+DIC_analysis.xlsx
+shoulders_cache.sqlite
+shoulders_cache.sqlite-shm
+shoulders_cache.sqlite
+shoulders_cache.sqlite-wal
+~$DIC_analysis.xlsx
+shoulders_cache.sqlite
+shoulders_cache.sqlite
