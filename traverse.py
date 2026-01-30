@@ -4,8 +4,12 @@ from typing import Optional, Set, List, Dict, Any, Tuple
 from core import WorkNode, canonical_key, classify_review_preprint, normalize_openalex_id
 from store import Store
 import time
-from collections import deque
+import random
+from collections import deque, Counter
 import requests
+from typing import Literal
+import logging
+
 
 @dataclass
 class Metrics:
@@ -28,6 +32,80 @@ class Traverser:
         self.max_depth = max_depth
         self.min_year = min_year
 
+
+        from typing import Literal
+
+    RefsSource = Literal["openalex", "openalex-empty", "openalex-missing"]
+
+    def ensure_refs_cached(self, key: str, metrics: Metrics) -> tuple[list[str], RefsSource]:
+        node = self.store.get(key) or WorkNode(key=key)
+
+        # Cached (including terminals)
+        if node.refs is not None and node.refs_source in ("openalex", "openalex-empty", "openalex-missing"):
+            metrics.cache_hit += 1
+            return list(node.refs), node.refs_source  # type: ignore[return-value]
+
+        # Infer OA id from key if needed
+        if node.oa_id is None and key.startswith("openalex:"):
+            node.oa_id = key.split(":", 1)[1]
+            self.store.upsert(node)
+
+        # Exclusions / cutoff -> terminal empty (and cached)
+        if node.is_review:
+            metrics.excluded_reviews += 1
+            node.refs, node.refs_source = [], "openalex-empty"
+            self.store.upsert(node)
+            return [], "openalex-empty"
+
+        if node.is_preprint:
+            metrics.excluded_preprints += 1
+            node.refs, node.refs_source = [], "openalex-empty"
+            self.store.upsert(node)
+            return [], "openalex-empty"
+
+        if self.min_year and node.year and node.year < self.min_year:
+            node.refs, node.refs_source = [], "openalex-empty"
+            self.store.upsert(node)
+            return [], "openalex-empty"
+
+        # Fetch from OA
+        rec = None
+        if node.oa_id:
+            metrics.cache_miss += 1
+            rec = self.oa.get_work(node.oa_id)
+
+        # Optional DOI resolve path if you ever use doi:* keys here
+        if not rec and node.doi and key.startswith("doi:"):
+            metrics.cache_miss += 1
+            r = self.oa.resolve_doi(node.doi)
+            if r:
+                metrics.cache_miss += 1
+                rec = self.oa.get_work(r["id"])
+
+        if not rec:
+            metrics.missing_oa_works += 1
+            metrics.terminal_no_refs += 1
+            node.refs, node.refs_source = [], "openalex-missing"
+            self.store.upsert(node)
+            return [], "openalex-missing"
+
+        metrics.expanded_openalex += 1
+        node = self._upsert_from_oa(node, rec)
+
+        refs: list[str] = [f"openalex:{normalize_openalex_id(rid)}"
+                        for rid in (rec.get("referenced_works") or [])]
+
+        if not refs:
+            metrics.terminal_no_refs += 1
+            node.refs, node.refs_source = [], "openalex-empty"
+            self.store.upsert(node)
+            return [], "openalex-empty"
+
+        node.refs, node.refs_source = refs, "openalex"
+        self.store.upsert(node)
+        return refs, "openalex"
+
+
     def _upsert_from_oa(self, node: WorkNode, rec: dict[str, Any]) -> WorkNode:
         node.oa_id = normalize_openalex_id(rec["id"])
         node.doi = rec.get("doi") or node.doi
@@ -47,104 +125,85 @@ class Traverser:
         if depth >= self.max_depth:
             return []
 
-        node = self.store.get(key) or WorkNode(key=key)
-
-        # Cache hit:
-        # - openalex-missing: known missing -> don't retry
-        # - openalex: only trust if refs is non-empty
-        if node.refs is not None and node.refs_source in ("openalex-missing", "openalex-empty"):
-            metrics.cache_hit += 1
+        refs, src = self.ensure_refs_cached(key, metrics)
+        if not refs:
             return []
 
-        if node.refs_source == "openalex" and node.refs:
-
-            metrics.cache_hit += 1
-            return [(rk, depth + 1) for rk in node.refs]
-
-
-        # Infer OpenAlex ID from key if placeholder
-        if node.oa_id is None and key.startswith("openalex:"):
-            node.oa_id = key.split(":", 1)[1]
-            self.store.upsert(node)
-
-        # Do not expand excluded nodes
-        if node.is_review:
-            metrics.excluded_reviews += 1
-            return []
-        if node.is_preprint:
-            metrics.excluded_preprints += 1
-            return []
-
-        # Year cutoff
-        if self.min_year and node.year and node.year < self.min_year:
-            return []
-
-        # Prefer OpenAlex if we have oa_id, otherwise try resolving from DOI
-        rec = None
-        if node.oa_id:
-            metrics.cache_miss += 1
-            try:
-                rec = self.oa.get_work(node.oa_id)
-            except requests.HTTPError as e:
-                if e.response is not None and e.response.status_code in (404, 410):
-                    rec = None
-                else:
-                    raise
-
-        # If we don't have a work via oa_id, try DOI resolution (for doi:* keys)
-        if not rec and node.doi and key.startswith("doi:"):
-            metrics.cache_miss += 1
-            try:
-                r = self.oa.resolve_doi(node.doi)
-            except requests.HTTPError as e:
-                if e.response is not None and e.response.status_code in (404, 410):
-                    r = None
-                else:
-                    raise
-            if r:
-                metrics.cache_miss += 1
-                rec = self.oa.get_work(r["id"])
-
-        missing_by_id = bool(node.oa_id and not rec)
-        # Still nothing -> treat as missing/terminal and move on
-        if not rec:
-            if missing_by_id:
-                metrics.missing_oa_works += 1
-            metrics.terminal_no_refs += 1
-
-            # cache the failure so we don't retry forever
-            node.refs = []
-            node.refs_source = "openalex-missing"
-            self.store.upsert(node)
-            return []
-
-        refs: list[str] = []
-
-        metrics.expanded_openalex += 1
-        node = self._upsert_from_oa(node, rec)
-        for rid in rec.get("referenced_works") or []:
-            refs.append(f"openalex:{normalize_openalex_id(rid)}")
-
-        if len(refs) == 0:
-            node.refs = []
-            node.refs_source = "openalex-empty"
-            self.store.upsert(node)
-            metrics.terminal_no_refs += 1
-            return []
-
-        node.refs = refs
-        node.refs_source = "openalex"
-        self.store.upsert(node)
-        # Persist refs + edges and schedule next frontier
         next_items: list[Tuple[str, int]] = []
         for rkey in refs:
-            self.store.add_edge(key, rkey, depth + 1, "openalex")
+            self.store.add_edge(key, rkey, depth + 1, src)
             if not self.store.get(rkey):
                 self.store.upsert(WorkNode(key=rkey))
             next_items.append((rkey, depth + 1))
-
-        # counting: count referenced nodes when they are later enriched; keep simple here
         return next_items
+
+    def random_walk_once(self, seed_key: str, rng: random.Random, max_steps: int, metrics: Metrics) -> tuple[int, str]:
+        cur = seed_key
+        depth = 0
+        for _ in range(max_steps):
+            refs, src = self.ensure_refs_cached(cur, metrics)
+            if not refs:
+                return depth, src
+            cur = rng.choice(refs)
+            depth += 1
+        return depth, "max_steps"
+
+    def random_walks(self, seed_key: str, n: int, seed: int = 0, max_steps: int = 10_000,
+                    heartbeat_sec: float = 5.0, heartbeat_every: int = 1000):
+        rng = random.Random(seed)
+        metrics = Metrics()
+        depths: list[int] = []
+        reasons = Counter()
+
+        t0 = time.time()
+        last_print = t0
+        last_i = 0
+
+        for i in range(1, n + 1):
+            d, reason = self.random_walk_once(seed_key, rng, max_steps, metrics)
+            depths.append(d)
+            reasons[reason] += 1
+
+            now = time.time()
+            if (i % heartbeat_every == 0) or (now - last_print >= heartbeat_sec):
+                dt = now - last_print
+                rate = (i - last_i) / dt if dt > 0 else 0.0
+
+                hit, miss = metrics.cache_hit, metrics.cache_miss
+                util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
+
+                msg = (
+                    f"[walk {i}/{n}] rate={rate:.1f}/s "
+                    f"cache={util:.1f}% term={dict(reasons)}"
+                )
+                print(msg, flush=True)
+                logging.info(msg)
+
+                last_print = now
+                last_i = i
+
+        # summary stats
+        depths.sort()
+        def q(p: float) -> int:
+            if not depths:
+                return 0
+            i = int(round((p / 100.0) * (len(depths) - 1)))
+            return depths[max(0, min(i, len(depths) - 1))]
+
+        hit, miss = metrics.cache_hit, metrics.cache_miss
+        util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
+
+        return {
+            "n": n,
+            "p50": q(50),
+            "p90": q(90),
+            "p99": q(99),
+            "max": depths[-1] if depths else 0,
+            "reasons": dict(reasons),
+            "cache_util_pct": util,
+            "metrics": metrics,
+            "elapsed_sec": time.time() - t0,
+        }
 
     def run(self, seed_key: str) -> Metrics:
         
@@ -207,10 +266,19 @@ class Traverser:
                 raise
             except requests.HTTPError as e:
                 if e.response is not None and e.response.status_code in (404, 410):
+                    # treat as missing work; don't spam stderr
+                    metrics.missing_oa_works += 1
+                    metrics.terminal_no_refs += 1
+
+                    node = self.store.get(key) or WorkNode(key=key)
+                    node.refs = []
+                    node.refs_source = "openalex-missing"
+                    self.store.upsert(node)
                     continue
                 print(f"[ERROR] key={key} depth={depth} err={e}", flush=True)
             except Exception as e:
                 print(f"[ERROR] key={key} depth={depth} err={e}", flush=True)
+
 
 
         # Count eligible nodes (excluding seed) based on reached keys

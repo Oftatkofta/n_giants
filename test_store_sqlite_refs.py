@@ -35,3 +35,4 @@ def test_sqlite_store_refs_roundtrip():
 
     finally:
         os.remove(path)
+

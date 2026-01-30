@@ -1,6 +1,7 @@
 from store import MemoryStore
 from traverse import Traverser
 
+
 class FakeOA:
     def __init__(self, by_id):
         self.by_id = by_id
