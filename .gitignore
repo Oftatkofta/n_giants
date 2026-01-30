@@ -213,3 +213,4 @@ shoulders_cache.sqlite-wal
 ~$DIC_analysis.xlsx
 shoulders_cache.sqlite
 shoulders_cache.sqlite
+*.sqlite
