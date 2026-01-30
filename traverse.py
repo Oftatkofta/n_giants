@@ -3,13 +3,17 @@ from dataclasses import dataclass
 from typing import Optional, Set, List, Dict, Any, Tuple
 from core import WorkNode, canonical_key, classify_review_preprint, normalize_openalex_id
 from store import Store
+from pathlib import Path
 import time
 import random
 from collections import deque, Counter
 import requests
 from typing import Literal
 import logging
+import json
 
+logger = logging.getLogger(__name__)
+logger.info("traverse module loaded")
 
 @dataclass
 class Metrics:
@@ -148,6 +152,7 @@ class Traverser:
             depth += 1
         return depth, "max_steps"
 
+
     def random_walks(self, seed_key: str, n: int, seed: int = 0, max_steps: int = 10_000,
                     heartbeat_sec: float = 5.0, heartbeat_every: int = 1000):
         rng = random.Random(seed)
@@ -172,12 +177,12 @@ class Traverser:
                 hit, miss = metrics.cache_hit, metrics.cache_miss
                 util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
 
-                msg = (
-                    f"[walk {i}/{n}] rate={rate:.1f}/s "
-                    f"cache={util:.1f}% term={dict(reasons)}"
+                logger.info(
+                    f"[walk {i:>7}/{n}] " +
+                    f"rate={rate:6.1f}/s " +
+                    f"cache={util:5.1f}% " +
+                    f"term={dict(reasons)}"
                 )
-                print(msg, flush=True)
-                logging.info(msg)
 
                 last_print = now
                 last_i = i
@@ -205,6 +210,110 @@ class Traverser:
             "elapsed_sec": time.time() - t0,
         }
 
+    def dfs(
+        self,
+        seed_key: str,
+        dfs_order: str = "as-listed",
+        dfs_limit: int = 100_000,
+        stop_on_terminal: bool = False,
+        stop_on_missing: bool = False,
+        record_paths: str = "",
+        rng_seed: int = 0,
+    ) -> Metrics:
+        """
+        Depth-first traversal over references using ensure_refs_cached().
+        Options:
+        - dfs_order: 'as-listed' | 'year' (oldest-first) | 'random' (seeded)
+        - dfs_limit: max visited nodes
+        - stop_on_terminal: stop after first terminal node
+        - stop_on_missing: if a node is 'openalex-missing', treat as terminal and optionally stop
+        - record_paths: JSONL path; each terminal produces {"reason":..., "depth":..., "path":[...]}
+        """
+        metrics = Metrics()
+        rng = random.Random(rng_seed)
+
+        # stack holds (key, depth, path_list)
+        stack: list[tuple[str, int, list[str]]] = [(seed_key, 0, [seed_key])]
+        seen: Set[str] = set()
+        visited = 0
+
+        writer = None
+        if record_paths:
+            p = Path(record_paths)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            writer = p.open("a", encoding="utf-8")
+
+        def emit_terminal(reason: str, depth: int, path: list[str]):
+            if writer:
+                writer.write(json.dumps({"reason": reason, "depth": depth, "path": path}) + "\n")
+                writer.flush()
+
+        try:
+            while stack:
+                key, depth, path = stack.pop()
+
+                if key in seen:
+                    continue
+                seen.add(key)
+                visited += 1
+                if visited >= dfs_limit:
+                    break
+
+                if depth >= self.max_depth:
+                    emit_terminal("max_depth", depth, path)
+                    if stop_on_terminal:
+                        break
+                    continue
+
+                refs, src = self.ensure_refs_cached(key, metrics)
+
+                # missing handling
+                if src == "openalex-missing":
+                    emit_terminal("openalex-missing", depth, path)
+                    if stop_on_terminal or stop_on_missing:
+                        break
+                    continue
+
+                # terminal handling
+                if not refs:
+                    # src will typically be openalex-empty (or missing handled above)
+                    emit_terminal(src, depth, path)
+                    if stop_on_terminal:
+                        break
+                    continue
+
+                # order refs according to option
+                ordered = list(refs)
+                if dfs_order == "random":
+                    rng.shuffle(ordered)
+                elif dfs_order == "year":
+                    # oldest-first (smaller year first). Unknown years go last.
+                    def y(k: str) -> int:
+                        n = self.store.get(k)
+                        return (n.year if (n and n.year) else 9999)
+                    ordered.sort(key=y)
+
+                # DFS: push in reverse so first in 'ordered' is processed next
+                for rk in reversed(ordered):
+                    if rk not in seen:
+                        stack.append((rk, depth + 1, path + [rk]))
+
+        finally:
+            if writer:
+                writer.close()
+
+        # Count eligible nodes (excluding seed) based on reached keys
+        for k in seen:
+            if k == seed_key:
+                continue
+            node = self.store.get(k)
+            if node and (node.is_review or node.is_preprint):
+                continue
+            metrics.counted += 1
+
+        return metrics
+
+
     def run(self, seed_key: str) -> Metrics:
         
         metrics = Metrics()
@@ -226,11 +335,11 @@ class Traverser:
             processed += 1
 
             if len(seen) >= max_seen:
-                print(f"[STOP] reached max_seen={max_seen}", flush=True)
+                logger.info(f"[STOP] reached max_seen={max_seen}", flush=True)
                 queue.clear()
                 break
 
-            if processed % 100 == 0 or (time.time() - last_print) > 5:
+            if processed % 1000 == 0 or (time.time() - last_print) > 5:
                 now = time.time()
                 dt = now - last_print
                 rate = (new_since_print / dt) if dt > 0 else 0.0
@@ -239,17 +348,14 @@ class Traverser:
                 util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
 
 
-                print(
-                    f"[depth cur={depth:2d} max={max_depth_seen:2d}] "
-                    f"processed={processed} "
-                    f"queue={len(queue)} seen={len(seen)} "
-                    f"expanded_oa={metrics.expanded_openalex} "
-                    f"terminal={metrics.terminal_no_refs} "
-                    f"missing_oa={metrics.missing_oa_works}",
-                    f"new/sec={rate:6.1f}",
-                    f"cache={util:5.1f}% (hit={hit} miss={miss}) ",
-                    flush=True,
-                )
+                logger.info(f"[depth cur={depth:2d} max={max_depth_seen:2d}] " +
+                f"processed={processed} " +
+                f"queue={len(queue)} seen={len(seen)} " +
+                f"expanded_oa={metrics.expanded_openalex} " +
+                f"terminal={metrics.terminal_no_refs} " +
+                f"missing_oa={metrics.missing_oa_works} " +
+                f"new/sec={rate:6.1f} " +
+                f"cache={util:5.1f}% (hit={hit} miss={miss}) ")
 
                 last_print = now
                 new_since_print = 0
@@ -275,9 +381,9 @@ class Traverser:
                     node.refs_source = "openalex-missing"
                     self.store.upsert(node)
                     continue
-                print(f"[ERROR] key={key} depth={depth} err={e}", flush=True)
+                logger.error(f"[ERROR] key={key} depth={depth} err={e}", flush=True)
             except Exception as e:
-                print(f"[ERROR] key={key} depth={depth} err={e}", flush=True)
+                logger.error(f"[ERROR] key={key} depth={depth} err={e}", flush=True)
 
 
 
