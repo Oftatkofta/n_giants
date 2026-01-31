@@ -13,7 +13,7 @@ import logging
 import json
 
 logger = logging.getLogger(__name__)
-logger.info("traverse module loaded")
+#logger.info("traverse module loaded")
 
 @dataclass
 class Metrics:

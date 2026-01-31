@@ -10,20 +10,14 @@ from clients import OpenAlexClient
 from sqlite_store import SQLiteStore
 from traverse import Traverser
 from core import WorkNode, normalize_openalex_id
+from helpers import setup_logging, summarize_paths
+
 import logging
 from pathlib import Path
 
 
+setup_logging("walk.log")
 LOG_PATH = Path(__file__).with_name("walk.log")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH, encoding="utf-8"),
-        logging.StreamHandler(),  # keep console output
-    ],
-)
 
 logging.info(f"Logging initialized → {LOG_PATH.resolve()}")
 
@@ -116,6 +110,9 @@ def main():
         if args.record_paths:
             logging.info("Recorded terminal paths to: %s", args.record_paths)
         logging.info("Metrics: %s", metrics)
+
+        if args.record_paths:
+            summarize_paths(args.db, args.record_paths, top_k=10)
 
     else:
         out = t.random_walks(
