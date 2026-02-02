@@ -323,7 +323,7 @@ class Traverser:
         processed = 0
         last_print = time.time()
         max_depth_seen = 0
-        max_seen = 5_000_000
+        max_seen = 50_000_000
         new_since_print = 0
 
         while queue:
@@ -339,7 +339,7 @@ class Traverser:
                 queue.clear()
                 break
 
-            if processed % 1000 == 0 or (time.time() - last_print) > 5:
+            if processed % 10000 == 0 or (time.time() - last_print) > 5:
                 now = time.time()
                 dt = now - last_print
                 rate = (new_since_print / dt) if dt > 0 else 0.0
@@ -348,14 +348,14 @@ class Traverser:
                 util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
 
 
-                logger.info(f"[depth cur={depth:2d} max={max_depth_seen:2d}] " +
+                logger.info(f"depth={depth:2d} " +
                 f"processed={processed} " +
                 f"queue={len(queue)} seen={len(seen)} " +
                 f"expanded_oa={metrics.expanded_openalex} " +
                 f"terminal={metrics.terminal_no_refs} " +
                 f"missing_oa={metrics.missing_oa_works} " +
                 f"new/sec={rate:6.1f} " +
-                f"cache={util:5.1f}% (hit={hit} miss={miss}) ")
+                f"cache={util:5.1f}% (hit={hit} miss={miss})")
 
                 last_print = now
                 new_since_print = 0
