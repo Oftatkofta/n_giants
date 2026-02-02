@@ -335,7 +335,7 @@ class Traverser:
             processed += 1
 
             if len(seen) >= max_seen:
-                logger.info(f"[STOP] reached max_seen={max_seen}", flush=True)
+                logger.info(f"[STOP] reached max_seen={max_seen}")
                 queue.clear()
                 break
 
