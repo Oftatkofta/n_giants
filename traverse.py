@@ -381,9 +381,9 @@ class Traverser:
                     node.refs_source = "openalex-missing"
                     self.store.upsert(node)
                     continue
-                logger.error(f"[ERROR] key={key} depth={depth} err={e}", flush=True)
+                logger.error(f"[ERROR] key={key} depth={depth} err={e}")
             except Exception as e:
-                logger.error(f"[ERROR] key={key} depth={depth} err={e}", flush=True)
+                logger.error(f"[ERROR] key={key} depth={depth} err={e}")
 
 
 
