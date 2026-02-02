@@ -47,6 +47,12 @@ class Traverser:
         # Cached (including terminals)
         if node.refs is not None and node.refs_source in ("openalex", "openalex-empty", "openalex-missing"):
             metrics.cache_hit += 1
+       # If cached record indicates a terminal, reflect that in metrics on reruns.
+        if node.refs_source in ("openalex-empty", "openalex-missing"):
+            metrics.terminal_no_refs += 1
+            if node.refs_source == "openalex-missing":
+                metrics.missing_oa_works += 1
+
             return list(node.refs), node.refs_source  # type: ignore[return-value]
 
         # Infer OA id from key if needed

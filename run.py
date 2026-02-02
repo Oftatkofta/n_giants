@@ -17,9 +17,6 @@ from pathlib import Path
 
 
 setup_logging("walk.log")
-LOG_PATH = Path(__file__).with_name("walk.log")
-
-logging.info(f"Logging initialized → {LOG_PATH.resolve()}")
 
 def main():
     load_dotenv()

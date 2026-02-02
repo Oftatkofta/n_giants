@@ -15,6 +15,11 @@ def setup_logging(log_name: str = "walk.log", level: int = logging.INFO) -> Path
     """
     log_path = Path(__file__).with_name(log_name)
 
+    # Prevent duplicate handler attachment
+    if logging.getLogger().handlers:
+        return log_path
+
+
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
