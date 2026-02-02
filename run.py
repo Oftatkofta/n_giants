@@ -53,6 +53,12 @@ def main():
                     help="Treat openalex-missing as terminal and stop (useful for clean paths).")
     ap.add_argument("--record-paths", default="",
                     help="If set, write visited terminal paths as JSONL to this file.")
+
+    ap.add_argument("--paths-top-k", type=int, default=10,
+                help="How many paths to show in the end-of-run summary.")
+    ap.add_argument("--paths-show", choices=["both", "deepest", "oldest", "none"], default="both",
+                help="Which path summaries to print from --record-paths.")
+
         
 
     args = ap.parse_args()
@@ -110,9 +116,11 @@ def main():
         if args.record_paths:
             logging.info("Recorded terminal paths to: %s", args.record_paths)
         logging.info("Metrics: %s", metrics)
+            
+        if args.record_paths and args.paths_show != "none":
+            summarize_paths(args.db, args.record_paths, top_k=args.paths_top_k, show=args.paths_show)
 
-        if args.record_paths:
-            summarize_paths(args.db, args.record_paths, top_k=10)
+            
 
     else:
         out = t.random_walks(

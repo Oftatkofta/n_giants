@@ -45,7 +45,8 @@ def format_path(path: List[str], meta: Dict[str, Tuple[Optional[int], Optional[s
 
 
 
-def summarize_paths(db_path: str, jsonl_path: str, top_k: int = 10) -> None:
+def summarize_paths(db_path: str, jsonl_path: str, top_k: int = 10, show: str = "both") -> None:
+
     """
     Read a DFS JSONL paths file, enrich with cached titles/years/types from SQLite,
     and log a compact report (reasons, deepest paths, oldest terminal-year paths).
@@ -89,14 +90,7 @@ def summarize_paths(db_path: str, jsonl_path: str, top_k: int = 10) -> None:
             meta[k] = (y, typ, title)
     conn.close()
 
-    def fmt_node(k: str) -> str:
-        y, typ, title = meta.get(k, (None, None, None))
-        y_s = str(y) if y is not None else "????"
-        typ_s = typ or "?"
-        title_s = (title or "<missing title>").replace("\n", " ").strip()
-        if len(title_s) > 140:
-            title_s = title_s[:137] + "..."
-        return f"{k} ({y_s}, {typ_s}) — {title_s}"
+
 
     def term_year(r: Dict[str, Any]) -> int:
         k = r["path"][-1]
@@ -112,22 +106,25 @@ def summarize_paths(db_path: str, jsonl_path: str, top_k: int = 10) -> None:
     logging.info("Recorded paths: %d", len(recs))
     logging.info("Termination reasons: %s", dict(reasons))
 
-    deepest = sorted(recs, key=depth_of, reverse=True)[:top_k]
-    logging.info("--- Top %d deepest terminal paths ---", top_k)
-    for i, r in enumerate(deepest, 1):
-        d = depth_of(r)
-        y = term_year(r)
-        reason = r.get("reason", "unknown")
-        logging.info("#%d depth=%d terminal_year=%s reason=%s", i, d, ("????" if y == 9999 else y), reason)
-        for j, k in enumerate(r["path"]):
-            logging.info("  %2d. %s", j, fmt_node(k))
+    if show in ("both", "deepest"):
+        deepest = sorted(recs, key=depth_of, reverse=True)[:top_k]
+        logging.info("--- Top %d deepest terminal paths ---", top_k)
+        for i, r in enumerate(deepest, 1):
+            d = depth_of(r)
+            y = term_year(r)
+            reason = r.get("reason", "unknown")
+            logging.info("#%d depth=%d terminal_year=%s reason=%s", i, d, ("????" if y == 9999 else y), reason)
+            logging.info("\n%s", format_path(r["path"], meta))
 
-    oldest = sorted(recs, key=term_year)[:top_k]
-    logging.info("--- Top %d oldest terminal-year paths ---", top_k)
-    for i, r in enumerate(oldest, 1):
-        d = depth_of(r)
-        y = term_year(r)
-        reason = r.get("reason", "unknown")
-        logging.info("#%d terminal_year=%s depth=%d reason=%s", i, ("????" if y == 9999 else y), d, reason)
-        for j, k in enumerate(r["path"]):
-            logging.info("  %2d. %s", j, fmt_node(k))
+    if show in ("both", "oldest"):
+        oldest = sorted(recs, key=term_year)[:top_k]
+        logging.info("--- Top %d oldest terminal-year paths ---", top_k)
+        for i, r in enumerate(oldest, 1):
+            d = depth_of(r)
+            y = term_year(r)
+            reason = r.get("reason", "unknown")
+            logging.info("#%d terminal_year=%s depth=%d reason=%s", i, ("????" if y == 9999 else y), d, reason)
+            logging.info("\n%s", format_path(r["path"], meta))
+
+
+
