@@ -81,6 +81,20 @@ def main() -> None:
         help="Only show paths where any title contains this substring (case-insensitive)",
     )
     ap.add_argument("--csv", default="", help="Optional CSV output path")
+
+    # NEW: selection mode for printing
+    ap.add_argument(
+        "--print-mode",
+        choices=["all", "longest", "oldest"],
+        default="all",
+        help=(
+            "Which paths to print (capped by --limit): "
+            "all = as they appear in the JSONL; "
+            "longest = deepest paths first; "
+            "oldest = oldest terminal-year first."
+        ),
+    )
+
     args = ap.parse_args()
 
     db_path = Path(args.db)
@@ -92,7 +106,8 @@ def main() -> None:
         raise SystemExit(f"JSONL not found: {jsonl_path}")
 
     # Read JSONL
-    records = load_records(jsonl_path)  # structure aligns with original behavior
+    records = load_records(jsonl_path)  # structure aligns with original behavior  [1](https://uppsalauniversitet-my.sharepoint.com/personal/jens_eriksson_imbim_uu_se/Documents/Microsoft%20Copilot%20Chat%20Files/show_paths.py)
+
     # Bulk fetch metadata for all unique keys
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row  # harmless, helps debugging
@@ -114,43 +129,74 @@ def main() -> None:
         title_s = (title or "<missing title>").replace("\\n", " ").strip()
         return f"{k} ({y_s}, {typ_s}) — {title_s}"
 
-    # Optional filters
+    # Optional filters (same as before)
     contains = args.contains.strip().lower()
-    out_rows: list[dict[str, object]] = []
-    printed = 0
 
+    def depth_of(rec: dict[str, object]) -> int:
+        path = rec.get("path") or []
+        return int(rec.get("depth", len(path) - 1)) if isinstance(path, list) else 0
+
+    def term_year_of(rec: dict[str, object]) -> int:
+        path = rec.get("path") or []
+        if not isinstance(path, list) or not path:
+            return 9999
+        terminal_key = path[-1]
+        y = year_of(terminal_key)
+        return y if isinstance(y, int) else 9999
+
+    # Apply per-record filters first (min-year, contains)
+    filtered: list[dict[str, object]] = []
     for rec in records:
         path = rec.get("path") or []
         if not isinstance(path, list) or not path:
             continue
 
+        # min-year filter
         terminal_key = path[-1]
         terminal_year = year_of(terminal_key)
         if args.min_year and (terminal_year is None or terminal_year > args.min_year):
             continue
 
-        if contains:
-            if not any(contains in title_of(k).lower() for k in path if isinstance(k, str)):
-                continue
+        # contains filter
+        if contains and not any(contains in title_of(k).lower() for k in path if isinstance(k, str)):
+            continue
+
+        filtered.append(rec)
+
+    # Selection by print mode (then cap by --limit)
+    if args.print_mode == "longest":
+        selected = sorted(filtered, key=depth_of, reverse=True)[: args.limit]
+    elif args.print_mode == "oldest":
+        selected = sorted(filtered, key=term_year_of)[: args.limit]
+    else:
+        selected = filtered[: args.limit]
+
+    # Print + collect CSV (same structure as before)
+    out_rows: list[dict[str, object]] = []
+    for idx, rec in enumerate(selected, start=1):
+        path = rec.get("path") or []
+        if not isinstance(path, list) or not path:
+            continue
 
         reason = rec.get("reason", "")
         depth = rec.get("depth", len(path) - 1)
 
-        # Print (same shape / formatting as original)
-        print(f"\n=== Path {printed + 1} reason={reason} depth={depth} ===")
+        # header
+        print(f"\n=== Path {idx} reason={reason} depth={depth} ===")
+        # body
         for i, k in enumerate(path):
             if not isinstance(k, str):
                 continue
             print(f"{i:>2d}. {format_node(k)}")
 
-        # Collect for CSV
+        # CSV rows
         for i, k in enumerate(path):
             if not isinstance(k, str):
                 continue
             y, typ, title = meta.get(k, (None, None, None))
             out_rows.append(
                 {
-                    "path_index": printed + 1,
+                    "path_index": idx,
                     "step": i,
                     "key": k,
                     "year": y,
@@ -160,10 +206,6 @@ def main() -> None:
                     "depth": depth if i == len(path) - 1 else "",
                 }
             )
-
-        printed += 1
-        if printed >= args.limit:
-            break
 
     if args.csv:
         csv_path = Path(args.csv)
