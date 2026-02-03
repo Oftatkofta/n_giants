@@ -1,34 +1,85 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
+import csv
 import json
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 
 
-def fetch_works(conn: sqlite3.Connection, keys: List[str]) -> Dict[str, Tuple[Optional[int], Optional[str], Optional[str]]]:
+def fetch_works_chunked(
+    conn: sqlite3.Connection,
+    keys: list[str],
+    chunk_size: int = 2000,
+) -> dict[str, tuple[int | None, str | None, str | None]]:
     """
-    Returns key -> (year, oa_type, title)
+    Returns key -> (year, oa_type, title), fetching in chunks to avoid extremely long
+    SQL statements on huge key sets. Keeps exact behavior for normal sizes.
     """
+    out: dict[str, tuple[int | None, str | None, str | None]] = {}
     if not keys:
-        return {}
-    qmarks = ",".join(["?"] * len(keys))
-    rows = conn.execute(
-        f"SELECT key, year, oa_type, title FROM works WHERE key IN ({qmarks})",
-        keys,
-    ).fetchall()
-    out = {}
-    for k, y, t, title in rows:
-        out[k] = (y, t, title)
+        return out
+
+    for i in range(0, len(keys), chunk_size):
+        batch = keys[i : i + chunk_size]
+        qmarks = ",".join(["?"] * len(batch))
+        rows = conn.execute(
+            f"SELECT key, year, oa_type, title FROM works WHERE key IN ({qmarks})",
+            batch,
+        ).fetchall()
+        for k, y, typ, title in rows:
+            out[k] = (y, typ, title)
     return out
 
 
-def main():
+def load_records(jsonl_path: Path) -> list[dict[str, object]]:
+    """
+    Read JSONL lines -> list of records (only those that contain a list-like 'path').
+    """
+    records: list[dict[str, object]] = []
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            path = rec.get("path") or []
+            if not isinstance(path, list):
+                continue
+            records.append(rec)
+    return records
+
+
+def collect_unique_keys(records: Iterable[dict[str, object]]) -> list[str]:
+    all_keys: list[str] = []
+    for rec in records:
+        path = rec.get("path") or []
+        if not isinstance(path, list):
+            continue
+        for k in path:
+            if isinstance(k, str):
+                all_keys.append(k)
+    return sorted(set(all_keys))
+
+
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="shoulders_cache.sqlite", help="SQLite cache file")
     ap.add_argument("--jsonl", required=True, help="dfs_paths.jsonl file")
     ap.add_argument("--limit", type=int, default=20, help="Max number of paths to print")
-    ap.add_argument("--min-year", type=int, default=0, help="Only show paths whose terminal year <= min-year (0 disables)")
-    ap.add_argument("--contains", default="", help="Only show paths where any title contains this substring (case-insensitive)")
+    ap.add_argument(
+        "--min-year",
+        type=int,
+        default=0,
+        help="Only show paths whose terminal year <= min-year (0 disables)",
+    )
+    ap.add_argument(
+        "--contains",
+        default="",
+        help="Only show paths where any title contains this substring (case-insensitive)",
+    )
     ap.add_argument("--csv", default="", help="Optional CSV output path")
     args = ap.parse_args()
 
@@ -40,34 +91,19 @@ def main():
     if not jsonl_path.exists():
         raise SystemExit(f"JSONL not found: {jsonl_path}")
 
+    # Read JSONL
+    records = load_records(jsonl_path)  # structure aligns with original behavior
+    # Bulk fetch metadata for all unique keys
     conn = sqlite3.connect(str(db_path))
-
-    # read JSONL lines
-    records: List[Dict[str, Any]] = []
-    all_keys: List[str] = []
-
-    with jsonl_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            path = rec.get("path") or []
-            if not isinstance(path, list):
-                continue
-            records.append(rec)
-            for k in path:
-                if isinstance(k, str):
-                    all_keys.append(k)
-
-    # bulk fetch metadata
-    meta = fetch_works(conn, sorted(set(all_keys)))
+    conn.row_factory = sqlite3.Row  # harmless, helps debugging
+    uniq_keys = collect_unique_keys(records)
+    meta = fetch_works_chunked(conn, uniq_keys)
 
     def title_of(k: str) -> str:
         y, typ, title = meta.get(k, (None, None, None))
         return title or "<missing title>"
 
-    def year_of(k: str) -> Optional[int]:
+    def year_of(k: str) -> int | None:
         y, _, _ = meta.get(k, (None, None, None))
         return y
 
@@ -75,22 +111,21 @@ def main():
         y, typ, title = meta.get(k, (None, None, None))
         y_s = str(y) if y is not None else "????"
         typ_s = typ or "?"
-        title_s = (title or "<missing title>").replace("\n", " ").strip()
+        title_s = (title or "<missing title>").replace("\\n", " ").strip()
         return f"{k} ({y_s}, {typ_s}) — {title_s}"
 
-    # optional filters
+    # Optional filters
     contains = args.contains.strip().lower()
-    out_rows = []
-
+    out_rows: list[dict[str, object]] = []
     printed = 0
+
     for rec in records:
         path = rec.get("path") or []
-        if not path:
+        if not isinstance(path, list) or not path:
             continue
 
         terminal_key = path[-1]
         terminal_year = year_of(terminal_key)
-
         if args.min_year and (terminal_year is None or terminal_year > args.min_year):
             continue
 
@@ -101,39 +136,43 @@ def main():
         reason = rec.get("reason", "")
         depth = rec.get("depth", len(path) - 1)
 
-        # print
-        print(f"\n=== Path {printed+1} | reason={reason} depth={depth} ===")
+        # Print (same shape / formatting as original)
+        print(f"\n=== Path {printed + 1} reason={reason} depth={depth} ===")
         for i, k in enumerate(path):
             if not isinstance(k, str):
                 continue
             print(f"{i:>2d}. {format_node(k)}")
 
-        # collect for csv
+        # Collect for CSV
         for i, k in enumerate(path):
             if not isinstance(k, str):
                 continue
             y, typ, title = meta.get(k, (None, None, None))
-            out_rows.append({
-                "path_index": printed + 1,
-                "step": i,
-                "key": k,
-                "year": y,
-                "type": typ,
-                "title": title,
-                "reason": reason if i == len(path) - 1 else "",
-                "depth": depth if i == len(path) - 1 else "",
-            })
+            out_rows.append(
+                {
+                    "path_index": printed + 1,
+                    "step": i,
+                    "key": k,
+                    "year": y,
+                    "type": typ,
+                    "title": title,
+                    "reason": reason if i == len(path) - 1 else "",
+                    "depth": depth if i == len(path) - 1 else "",
+                }
+            )
 
         printed += 1
         if printed >= args.limit:
             break
 
     if args.csv:
-        import csv
         csv_path = Path(args.csv)
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         with csv_path.open("w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["path_index","step","key","year","type","title","reason","depth"])
+            w = csv.DictWriter(
+                f,
+                fieldnames=["path_index", "step", "key", "year", "type", "title", "reason", "depth"],
+            )
             w.writeheader()
             w.writerows(out_rows)
         print(f"\nWrote CSV: {csv_path}")
