@@ -14,7 +14,7 @@ from helpers import setup_logging, summarize_paths
 from sqlite_store import SQLiteStore
 from traverse import Traverser
 
-# Initialize logging once 
+# Initialize logging once (idempotent if helpers.setup_logging has a handler guard)
 setup_logging("walk.log")
 
 
@@ -31,9 +31,15 @@ def main() -> None:
 
     ap.add_argument(
         "--mode",
-        choices=["bfs", "walk", "dfs"],
+        choices=["bfs", "walk", "dfs", "promote-longest"],
         default="bfs",
-        help="Traversal mode: bfs (full frontier) or walk (random lineage sampling) or dfs (depth-first search).",
+        help=(
+            "Traversal mode: "
+            "bfs (full frontier), "
+            "walk (random lineage sampling), "
+            "dfs (depth-first search), "
+            "promote-longest (random descent, one-level backtrack, oldest-first sibling exploration with path promotion)."
+        ),
     )
 
     # Random-walk options
@@ -44,7 +50,7 @@ def main() -> None:
         "--walk-seed",
         type=int,
         default=random.randint(0, 1_000_000),
-        help="RNG seed for random walks (mode=walk).",
+        help="RNG seed for random walks and DFS ordering when applicable.",
     )
     ap.add_argument(
         "--walk-max-steps",
@@ -53,7 +59,7 @@ def main() -> None:
         help="Max steps per walk before forcing termination (mode=walk).",
     )
 
-    # DFS-specific
+    # DFS/Hybrid-specific
     ap.add_argument(
         "--dfs-order",
         choices=["as-listed", "year", "random"],
@@ -63,8 +69,8 @@ def main() -> None:
     ap.add_argument(
         "--dfs-limit",
         type=int,
-        default=100_000,
-        help="Max number of nodes to visit in DFS (guardrail).",
+        default=100,
+        help="Max number of nodes to visit in DFS/hybrid (guardrail).",
     )
     ap.add_argument(
         "--stop-on-terminal",
@@ -85,7 +91,7 @@ def main() -> None:
         "--paths-top-k",
         type=int,
         default=10,
-        help="How many paths to show in the end-of-run summary.",
+        help="How many paths to show in the end-of-run summary (when --record-paths is set).",
     )
     ap.add_argument(
         "--paths-show",
@@ -115,7 +121,7 @@ def main() -> None:
     if not store.get(seed_key):
         store.upsert(WorkNode(key=seed_key, oa_id=seed_oa_id))
 
-    # Traverse
+    # Traverser (BFS/DFS/Hybrid/Walk)
     t = Traverser(
         store,
         oa=oa,
@@ -147,11 +153,26 @@ def main() -> None:
         if args.record_paths:
             logging.info("Recorded terminal paths to: %s", args.record_paths)
         logging.info("Metrics: %s", metrics)
-
         if args.record_paths and args.paths_show != "none":
             summarize_paths(args.db, args.record_paths, top_k=args.paths_top_k, show=args.paths_show)
 
-    else:
+    elif args.mode == "promote-longest":
+        metrics = t.dfs_promote_longest(
+            seed_key=seed_key,
+            rng_seed=args.walk_seed,     # seed the random descent
+            dfs_limit=args.dfs_limit,
+            record_paths=args.record_paths,
+        )
+        logging.info("=== RUN COMPLETE (PROMOTE-LONGEST) ===")
+        logging.info("Seed DOI: %s", args.doi)
+        logging.info("Seed key: %s", seed_key)
+        if args.record_paths:
+            logging.info("Recorded terminal paths to: %s", args.record_paths)
+            if args.paths_show != "none":
+                summarize_paths(args.db, args.record_paths, top_k=args.paths_top_k, show=args.paths_show)
+        logging.info("Metrics: %s", metrics)
+
+    else:  # mode == "walk"
         out = t.random_walks(
             seed_key=seed_key,
             n=args.walks,

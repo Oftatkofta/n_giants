@@ -215,3 +215,4 @@ shoulders_cache.sqlite
 shoulders_cache.sqlite
 *.sqlite
 dfs_paths.jsonl
+hybrid_paths.json

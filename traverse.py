@@ -302,6 +302,124 @@ class Traverser:
 
         return metrics
 
+    def dfs_promote_longest(
+        self,
+        seed_key: str,
+        rng_seed: int = 0,
+        dfs_limit: int = 100_000,
+        record_paths: str = "",
+    ) -> Metrics:
+        """
+        Hybrid traversal mode: random descent to terminal, then one-level backtrack
+        and oldest-first sibling exploration with path promotion.
+
+        Algorithm:
+        1) RANDOM descent from the seed until a terminal is reached.
+            -> This initial terminal path is main_path; emit terminal JSONL if requested.
+        2) Backtrack EXACTLY ONE LEVEL (parent of the terminal).
+        3) Explore parent's remaining children OLDEST-FIRST (by year).
+            For each sibling:
+            - Perform a RANDOM descent to terminal (emit JSONL).
+            - If that candidate path is STRICTLY LONGER than main_path:
+                    main_path = candidate; repeat from step (2) with the new parent.
+        4) Stop when no sibling improves the main path or dfs_limit/max_depth are reached.
+
+        Returns:
+        Metrics gathered during the run. Terminal accounting uses ensure_refs_cached(),
+        so cached terminals on reruns are counted correctly.
+        """
+        rng = random.Random(rng_seed)
+        metrics = Metrics()
+
+        # --- helpers ---
+
+        def year_of(k: str) -> int:
+            n = self.store.get(k)
+            return n.year if (n and n.year) else 9999
+
+        def terminal_descent(start_key: str) -> tuple[list[str], str]:
+            """
+            Randomly descend from start_key until reaching a terminal (or max depth).
+            Returns (path, reason).
+            """
+            key = start_key
+            depth = 0
+            path: list[str] = [key]
+            while True:
+                refs, src = self.ensure_refs_cached(key, metrics)
+                if not refs or depth >= self.max_depth:
+                    return path, src
+                key = rng.choice(refs)
+                depth += 1
+                path.append(key)
+
+        # Use the shared JSONL writer/emitter (same contract as dfs())
+        from helpers import open_paths_writer, emit_terminal  # already imported at module top in your refactor
+
+        with open_paths_writer(record_paths) as writer:
+            def _emit(reason: str, depth: int, path: list[str]) -> None:
+                emit_terminal(writer, reason, depth, path)
+
+            # 1) initial random descent
+            main_path, main_reason = terminal_descent(seed_key)
+            _emit(main_reason, len(main_path) - 1, main_path)
+
+            visited_nodes = len(main_path)
+            if visited_nodes >= dfs_limit:
+                # Count eligible nodes on the best path found so far
+                for k in set(main_path):
+                    if k == seed_key:
+                        continue
+                    node = self.store.get(k)
+                    if node and (node.is_review or node.is_preprint):
+                        continue
+                    metrics.counted += 1
+                return metrics
+
+            # 2) one-level backtrack loop with promotion
+            while True:
+                if len(main_path) < 2:
+                    break  # cannot backtrack if only the seed is present
+
+                parent = main_path[-2]
+                refs, _ = self.ensure_refs_cached(parent, metrics)
+
+                # siblings: other children of parent (exclude the one used by main_path)
+                used_child = main_path[-1]
+                siblings = [r for r in refs if r != used_child]
+                siblings.sort(key=year_of)  # oldest-first by year
+
+                improved = False
+                for sib in siblings:
+                    if visited_nodes >= dfs_limit:
+                        break
+
+                    cand_path, cand_reason = terminal_descent(sib)
+                    visited_nodes += len(cand_path)
+
+                    _emit(cand_reason, len(cand_path) - 1, cand_path)
+
+                    # strictly longer path is promoted
+                    if len(cand_path) > len(main_path):
+                        main_path = cand_path
+                        main_reason = cand_reason
+                        improved = True
+                        break  # restart loop from new main_path's parent
+
+                if not improved:
+                    break
+
+        # Final metrics: count eligible nodes on the best path
+        for k in set(main_path):
+            if k == seed_key:
+                continue
+            node = self.store.get(k)
+            if node and (node.is_review or node.is_preprint):
+                continue
+            metrics.counted += 1
+
+        return metrics
+
     def run(self, seed_key: str) -> Metrics:
         metrics = Metrics()
         seen: set[str] = {seed_key}
