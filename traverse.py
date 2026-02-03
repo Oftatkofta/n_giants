@@ -1,19 +1,22 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional, Set, List, Dict, Any, Tuple
-from core import WorkNode, canonical_key, classify_review_preprint, normalize_openalex_id
-from store import Store
-from pathlib import Path
-import time
-import random
-from collections import deque, Counter
-import requests
-from typing import Literal
+
 import logging
-import json
+import random
+import time
+from collections import Counter, deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
+
+import requests
+
+from core import WorkNode, canonical_key, classify_review_preprint, normalize_openalex_id
+from helpers import open_paths_writer, emit_terminal
+from store import Store
 
 logger = logging.getLogger(__name__)
-#logger.info("traverse module loaded")
+# logger.info("traverse module loaded")
+
 
 @dataclass
 class Metrics:
@@ -36,23 +39,19 @@ class Traverser:
         self.max_depth = max_depth
         self.min_year = min_year
 
-
-        from typing import Literal
-
-    RefsSource = Literal["openalex", "openalex-empty", "openalex-missing"]
-
-    def ensure_refs_cached(self, key: str, metrics: Metrics) -> tuple[list[str], RefsSource]:
+    def ensure_refs_cached(
+        self, key: str, metrics: Metrics
+    ) -> tuple[list[str], Literal["openalex", "openalex-empty", "openalex-missing"]]:
         node = self.store.get(key) or WorkNode(key=key)
 
         # Cached (including terminals)
         if node.refs is not None and node.refs_source in ("openalex", "openalex-empty", "openalex-missing"):
             metrics.cache_hit += 1
-       # If cached record indicates a terminal, reflect that in metrics on reruns.
-        if node.refs_source in ("openalex-empty", "openalex-missing"):
-            metrics.terminal_no_refs += 1
-            if node.refs_source == "openalex-missing":
-                metrics.missing_oa_works += 1
-
+            # If cached record indicates a terminal, reflect that in metrics on reruns.
+            if node.refs_source in ("openalex-empty", "openalex-missing"):
+                metrics.terminal_no_refs += 1
+                if node.refs_source == "openalex-missing":
+                    metrics.missing_oa_works += 1
             return list(node.refs), node.refs_source  # type: ignore[return-value]
 
         # Infer OA id from key if needed
@@ -79,7 +78,7 @@ class Traverser:
             return [], "openalex-empty"
 
         # Fetch from OA
-        rec = None
+        rec: dict[str, Any] | None = None
         if node.oa_id:
             metrics.cache_miss += 1
             rec = self.oa.get_work(node.oa_id)
@@ -102,9 +101,7 @@ class Traverser:
         metrics.expanded_openalex += 1
         node = self._upsert_from_oa(node, rec)
 
-        refs: list[str] = [f"openalex:{normalize_openalex_id(rid)}"
-                        for rid in (rec.get("referenced_works") or [])]
-
+        refs: list[str] = [f"openalex:{normalize_openalex_id(rid)}" for rid in (rec.get("referenced_works") or [])]
         if not refs:
             metrics.terminal_no_refs += 1
             node.refs, node.refs_source = [], "openalex-empty"
@@ -115,31 +112,26 @@ class Traverser:
         self.store.upsert(node)
         return refs, "openalex"
 
-
     def _upsert_from_oa(self, node: WorkNode, rec: dict[str, Any]) -> WorkNode:
         node.oa_id = normalize_openalex_id(rec["id"])
         node.doi = rec.get("doi") or node.doi
         node.title = rec.get("title") or node.title
         node.year = rec.get("publication_year") or node.year
         node.oa_type = rec.get("type") or node.oa_type
-
         # Best-effort venue
         hv = rec.get("host_venue") or {}
         node.venue = (hv.get("display_name") if isinstance(hv, dict) else None) or node.venue
-
         node.is_review, node.is_preprint = classify_review_preprint(node.title, node.oa_type, None, node.venue)
         self.store.upsert(node)
         return node
 
-    def expand_one(self, key: str, depth: int, metrics: Metrics) -> List[Tuple[str, int]]:
+    def expand_one(self, key: str, depth: int, metrics: Metrics) -> list[tuple[str, int]]:
         if depth >= self.max_depth:
             return []
-
         refs, src = self.ensure_refs_cached(key, metrics)
         if not refs:
             return []
-
-        next_items: list[Tuple[str, int]] = []
+        next_items: list[tuple[str, int]] = []
         for rkey in refs:
             self.store.add_edge(key, rkey, depth + 1, src)
             if not self.store.get(rkey):
@@ -158,14 +150,19 @@ class Traverser:
             depth += 1
         return depth, "max_steps"
 
-
-    def random_walks(self, seed_key: str, n: int, seed: int = 0, max_steps: int = 10_000,
-                    heartbeat_sec: float = 5.0, heartbeat_every: int = 1000):
+    def random_walks(
+        self,
+        seed_key: str,
+        n: int,
+        seed: int = 0,
+        max_steps: int = 100,
+        heartbeat_sec: float = 5.0,
+        heartbeat_every: int = 1000,
+    ):
         rng = random.Random(seed)
         metrics = Metrics()
         depths: list[int] = []
         reasons = Counter()
-
         t0 = time.time()
         last_print = t0
         last_i = 0
@@ -174,27 +171,24 @@ class Traverser:
             d, reason = self.random_walk_once(seed_key, rng, max_steps, metrics)
             depths.append(d)
             reasons[reason] += 1
-
             now = time.time()
             if (i % heartbeat_every == 0) or (now - last_print >= heartbeat_sec):
                 dt = now - last_print
                 rate = (i - last_i) / dt if dt > 0 else 0.0
-
                 hit, miss = metrics.cache_hit, metrics.cache_miss
                 util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
-
                 logger.info(
-                    f"[walk {i:>7}/{n}] " +
-                    f"rate={rate:6.1f}/s " +
-                    f"cache={util:5.1f}% " +
+                    f"[walk {i:>7}/{n}] "
+                    f"rate={rate:6.1f}/s "
+                    f"cache={util:5.1f}% "
                     f"term={dict(reasons)}"
                 )
-
                 last_print = now
                 last_i = i
 
         # summary stats
         depths.sort()
+
         def q(p: float) -> int:
             if not depths:
                 return 0
@@ -228,36 +222,29 @@ class Traverser:
     ) -> Metrics:
         """
         Depth-first traversal over references using ensure_refs_cached().
+
         Options:
-        - dfs_order: 'as-listed' | 'year' (oldest-first) | 'random' (seeded)
-        - dfs_limit: max visited nodes
-        - stop_on_terminal: stop after first terminal node
-        - stop_on_missing: if a node is 'openalex-missing', treat as terminal and optionally stop
-        - record_paths: JSONL path; each terminal produces {"reason":..., "depth":..., "path":[...]}
+          - dfs_order: 'as-listed' | 'year' (oldest-first) | 'random' (seeded)
+          - dfs_limit: max visited nodes
+          - stop_on_terminal: stop after first terminal node
+          - stop_on_missing: if a node is 'openalex-missing', treat as terminal and optionally stop
+          - record_paths: JSONL path; each terminal produces {"reason":..., "depth":..., "path":[...]}
         """
         metrics = Metrics()
         rng = random.Random(rng_seed)
 
         # stack holds (key, depth, path_list)
         stack: list[tuple[str, int, list[str]]] = [(seed_key, 0, [seed_key])]
-        seen: Set[str] = set()
+        seen: set[str] = set()
         visited = 0
 
-        writer = None
-        if record_paths:
-            p = Path(record_paths)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            writer = p.open("a", encoding="utf-8")
+        # Use shared writer helpers (behavior-neutral)
+        with open_paths_writer(record_paths) as writer:
+            def _emit(reason: str, depth: int, path: list[str]) -> None:
+                emit_terminal(writer, reason, depth, path)
 
-        def emit_terminal(reason: str, depth: int, path: list[str]):
-            if writer:
-                writer.write(json.dumps({"reason": reason, "depth": depth, "path": path}) + "\n")
-                writer.flush()
-
-        try:
             while stack:
                 key, depth, path = stack.pop()
-
                 if key in seen:
                     continue
                 seen.add(key)
@@ -266,7 +253,7 @@ class Traverser:
                     break
 
                 if depth >= self.max_depth:
-                    emit_terminal("max_depth", depth, path)
+                    _emit("max_depth", depth, path)
                     if stop_on_terminal:
                         break
                     continue
@@ -275,7 +262,7 @@ class Traverser:
 
                 # missing handling
                 if src == "openalex-missing":
-                    emit_terminal("openalex-missing", depth, path)
+                    _emit("openalex-missing", depth, path)
                     if stop_on_terminal or stop_on_missing:
                         break
                     continue
@@ -283,7 +270,7 @@ class Traverser:
                 # terminal handling
                 if not refs:
                     # src will typically be openalex-empty (or missing handled above)
-                    emit_terminal(src, depth, path)
+                    _emit(src, depth, path)
                     if stop_on_terminal:
                         break
                     continue
@@ -304,10 +291,6 @@ class Traverser:
                     if rk not in seen:
                         stack.append((rk, depth + 1, path + [rk]))
 
-        finally:
-            if writer:
-                writer.close()
-
         # Count eligible nodes (excluding seed) based on reached keys
         for k in seen:
             if k == seed_key:
@@ -319,13 +302,10 @@ class Traverser:
 
         return metrics
 
-
     def run(self, seed_key: str) -> Metrics:
-        
         metrics = Metrics()
-        seen: Set[str] = {seed_key}
+        seen: set[str] = {seed_key}
         queue = deque([(seed_key, 0)])
-
         processed = 0
         last_print = time.time()
         max_depth_seen = 0
@@ -334,10 +314,8 @@ class Traverser:
 
         while queue:
             key, depth = queue.popleft()
-            
             if depth > max_depth_seen:
                 max_depth_seen = depth
-            
             processed += 1
 
             if len(seen) >= max_seen:
@@ -352,17 +330,16 @@ class Traverser:
                 hit = metrics.cache_hit
                 miss = metrics.cache_miss
                 util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
-
-
-                logger.info(f"depth={depth:2d} " +
-                f"processed={processed} " +
-                f"queue={len(queue)} seen={len(seen)} " +
-                f"expanded_oa={metrics.expanded_openalex} " +
-                f"terminal={metrics.terminal_no_refs} " +
-                f"missing_oa={metrics.missing_oa_works} " +
-                f"new/sec={rate:6.1f} " +
-                f"cache={util:5.1f}% (hit={hit} miss={miss})")
-
+                logger.info(
+                    f"depth={depth:2d} "
+                    f"processed={processed} "
+                    f"queue={len(queue)} seen={len(seen)} "
+                    f"expanded_oa={metrics.expanded_openalex} "
+                    f"terminal={metrics.terminal_no_refs} "
+                    f"missing_oa={metrics.missing_oa_works} "
+                    f"new/sec={rate:6.1f} "
+                    f"cache={util:5.1f}% (hit={hit} miss={miss})"
+                )
                 last_print = now
                 new_since_print = 0
 
@@ -373,7 +350,6 @@ class Traverser:
                     seen.add(nxt_key)
                     new_since_print += 1
                     queue.append((nxt_key, nxt_depth))
-            
             except KeyboardInterrupt:
                 raise
             except requests.HTTPError as e:
@@ -381,7 +357,6 @@ class Traverser:
                     # treat as missing work; don't spam stderr
                     metrics.missing_oa_works += 1
                     metrics.terminal_no_refs += 1
-
                     node = self.store.get(key) or WorkNode(key=key)
                     node.refs = []
                     node.refs_source = "openalex-missing"
@@ -390,8 +365,6 @@ class Traverser:
                 logger.error(f"[ERROR] key={key} depth={depth} err={e}")
             except Exception as e:
                 logger.error(f"[ERROR] key={key} depth={depth} err={e}")
-
-
 
         # Count eligible nodes (excluding seed) based on reached keys
         for k in seen:
