@@ -222,7 +222,11 @@ python run.py --doi "10.1038/s41588-025-02218-x" --mode bfs --max-depth 3
 depth= 2 processed=2048 queue=53111 seen=55159 expanded_oa=107 terminal=168 missing_oa=37 new/sec=1648.0 cache=94.7%
 ```
 
-> **Note:** BFS explores all references at each level before going deeper. Even with `--max-depth 3`, this can expand to tens of thousands of works. Use `--max-depth` carefully or prefer DFS/walk modes for exploration.
+> **Warning:** BFS explores *all* references at each level before going deeper. Even with `--max-depth 3`, this can expand to tens of thousands of works.
+>
+> n_giants can provide an **exact** answer (in only 2-3 months), or an **approximate** answer in minutes — if you are not limited by pathological perfectionism and odd fixations.
+>
+> Use `--max-depth` carefully or prefer DFS/walk modes for exploration.
 
 ---
 
