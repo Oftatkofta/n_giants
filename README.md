@@ -329,3 +329,6 @@ MIT License — See [LICENSE](LICENSE) for details.
 - Inspired by the idea of tracing the intellectual lineage of scientific discoveries
 
 *"If I have seen further, it is by standing on the shoulders of giants."* — Isaac Newton (1675)
+
+*"How many giants?"* — Jens Eriksson
+
