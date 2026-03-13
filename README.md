@@ -263,6 +263,93 @@ When using `--record-paths`, terminal paths are saved as JSONL:
 
 ---
 
+## Visualization & Analysis
+
+### show_paths.py — Explore Recorded Paths
+
+The `show_paths.py` script provides rich filtering and visualization of terminal paths recorded with `--record-paths`.
+
+```bash
+python show_paths.py --jsonl <paths.jsonl> [options]
+
+Options:
+  --db             SQLite cache file (default: shoulders_cache.sqlite)
+  --limit          Max paths to display (default: 20)
+  --print-mode     Sort by: all, longest, oldest (default: all)
+  --min-year       Only show paths ending before this year
+  --contains       Filter paths containing keyword in any title
+  --csv            Export results to CSV file
+```
+
+---
+
+#### Example: Show Longest Citation Chains
+
+```bash
+python show_paths.py --jsonl viz_example.jsonl --print-mode longest --limit 3
+```
+
+**Output:**
+```
+=== Path 1 reason=openalex-empty depth=13 ===
+ 0. openalex:W4411246386 (2025, article) — A scalable gut epithelial organoid model...
+ 1. openalex:W4214493147 (2022, article) — The type three secretion system effector protein IpgB1...
+ 2. openalex:W1997261581 (2013, article) — Enzymatically active Rho and Rac small-GTPases...
+ 3. openalex:W1602426796 (1996, article) — Rho-dependent membrane folding causes Shigella entry...
+ 4. openalex:W2334456031 (1991, review) — Genetic and Molecular Basis of Epithelial Cell Invasion...
+ 5. openalex:W1881868864 (1985, article) — Identification and antigenic characterization...
+ 6. openalex:W1841532970 (1983, article) — Alterations in the pathogenicity of E. coli K-12...
+ 7. openalex:W1876016322 (1982, article) — Involvement of a plasmid in the invasive ability...
+ 8. openalex:W1546818619 (1965, article) — Abortive Intestinal Infection With an E. coli-Shigella Hybrid
+ 9. openalex:W1622188711 (1963, article) — EXPERIMENTAL SHIGELLA INFECTIONS VI
+10. openalex:W1998970463 (1956, article) — EXPERIMENTAL ENTERIC SHIGELLA AND VIBRIO INFECTIONS...
+11. openalex:W2047269947 (1955, article) — The Fatal Enteric Cholera Infection in the Guinea Pig...
+12. openalex:W2087770430 (1951, article) — An experimental study of the action of cholera toxin
+13. openalex:W2327104637 (1940, article) — Acute Circulatory Failure (Shock)...
+
+=== Path 2 reason=openalex-empty depth=3 ===
+ 0. openalex:W2106159331 (1946, article) — The production and removal of oedema fluid...
+ 1. openalex:W2091824669 (1943, article) — The blood volume of normal animals
+ 2. openalex:W2155226425 (1937, article) — CLINICAL STUDIES OF THE BLOOD VOLUME...
+ 3. openalex:W2886901098 (1920, article) — BLOOD VOLUME STUDIES
+```
+
+This 13-step chain traces from 2025 organoid research back through Shigella pathogenesis, plasmid biology (1980s), and early enteric infection studies to a 1940 paper on circulatory shock!
+
+---
+
+#### Example: Filter by Keyword
+
+Find all paths mentioning "Shigella":
+
+```bash
+python show_paths.py --jsonl viz_example.jsonl --contains "shigella" --limit 5
+```
+
+**Output:**
+```
+=== Path 1 reason=openalex-empty depth=13 ===
+ 0. openalex:W4411246386 (2025, article) — A scalable gut epithelial organoid model...
+ 1. openalex:W4214493147 (2022, article) — ...IpgB1 promotes Shigella flexneri cell-to-cell spread...
+ ...
+ 7. openalex:W1876016322 (1982, article) — Involvement of a plasmid in the invasive ability of Shigella flexneri
+ ...
+```
+
+---
+
+#### Example: Export to CSV
+
+Export paths for analysis in Excel, R, or Python:
+
+```bash
+python show_paths.py --jsonl viz_example.jsonl --print-mode oldest --limit 10 --csv paths_export.csv
+```
+
+Creates a CSV with columns: `path_index`, `step`, `key`, `year`, `type`, `title`, `reason`, `depth`
+
+---
+
 ## Filtering
 
 The tool automatically excludes certain paper types to focus on primary research:
