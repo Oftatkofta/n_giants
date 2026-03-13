@@ -265,6 +265,22 @@ When using `--record-paths`, terminal paths are saved as JSONL:
 
 ## Visualization & Analysis
 
+### Complete Workflow Example
+
+**Step 1:** Run traversal and record paths to a JSONL file:
+
+```bash
+python run.py --doi "10.1038/s41588-025-02218-x" --mode promote-longest --dfs-limit 100 --record-paths paths.jsonl
+```
+
+**Step 2:** Explore the recorded paths with `show_paths.py`:
+
+```bash
+python show_paths.py --jsonl paths.jsonl --print-mode longest --limit 5
+```
+
+---
+
 ### show_paths.py — Explore Recorded Paths
 
 The `show_paths.py` script provides rich filtering and visualization of terminal paths recorded with `--record-paths`.
@@ -286,7 +302,7 @@ Options:
 #### Example: Show Longest Citation Chains
 
 ```bash
-python show_paths.py --jsonl viz_example.jsonl --print-mode longest --limit 3
+python show_paths.py --jsonl paths.jsonl --print-mode longest --limit 3
 ```
 
 **Output:**
@@ -323,7 +339,7 @@ This 13-step chain traces from 2025 organoid research back through Shigella path
 Find all paths mentioning "Shigella":
 
 ```bash
-python show_paths.py --jsonl viz_example.jsonl --contains "shigella" --limit 5
+python show_paths.py --jsonl paths.jsonl --contains "shigella" --limit 5
 ```
 
 **Output:**
@@ -343,7 +359,7 @@ python show_paths.py --jsonl viz_example.jsonl --contains "shigella" --limit 5
 Export paths for analysis in Excel, R, or Python:
 
 ```bash
-python show_paths.py --jsonl viz_example.jsonl --print-mode oldest --limit 10 --csv paths_export.csv
+python show_paths.py --jsonl paths.jsonl --print-mode oldest --limit 10 --csv paths_export.csv
 ```
 
 Creates a CSV with columns: `path_index`, `step`, `key`, `year`, `type`, `title`, `reason`, `depth`
@@ -383,12 +399,14 @@ The tool uses a persistent session and respects rate limits. Cached results mini
 ## Architecture
 
 ```
-run.py              # CLI entrypoint
+run.py              # CLI entrypoint for traversal
 ├── clients.py      # OpenAlex API client
 ├── core.py         # Data models (WorkNode) and utilities
 ├── traverse.py     # BFS/DFS/Walk/Hybrid traversal algorithms
 ├── sqlite_store.py # SQLite-backed caching layer
 └── helpers.py      # Logging and path formatting utilities
+
+show_paths.py       # Visualization & analysis of recorded paths
 ```
 
 ---
