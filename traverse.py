@@ -32,12 +32,13 @@ class Metrics:
 
 
 class Traverser:
-    def __init__(self, store: Store, oa, s2=None, max_depth: int = 20, min_year: int = 0):
+    def __init__(self, store: Store, oa, s2=None, max_depth: int = 20, min_year: int = 0, batch_size: int = 50):
         self.store = store
         self.oa = oa
         self.s2 = s2
         self.max_depth = max_depth
         self.min_year = min_year
+        self.batch_size = batch_size
 
     def ensure_refs_cached(
         self, key: str, metrics: Metrics
@@ -124,6 +125,86 @@ class Traverser:
         node.is_review, node.is_preprint = classify_review_preprint(node.title, node.oa_type, None, node.venue)
         self.store.upsert(node)
         return node
+
+    def prefetch_batch(self, keys: list[str], metrics: Metrics) -> int:
+        """
+        Pre-fetch a batch of works in parallel and cache them.
+        Returns the number of works actually fetched from the API.
+        """
+        # Filter to keys that need fetching (not already cached with refs)
+        to_fetch: list[str] = []
+        oa_id_to_key: dict[str, str] = {}
+
+        for key in keys:
+            node = self.store.get(key) or WorkNode(key=key)
+
+            # Skip if already cached
+            if node.refs is not None and node.refs_source in ("openalex", "openalex-empty", "openalex-missing"):
+                continue
+
+            # Skip exclusions (reviews, preprints, year cutoff)
+            if node.is_review or node.is_preprint:
+                continue
+            if self.min_year and node.year and node.year < self.min_year:
+                continue
+
+            # Extract OA id
+            oa_id = node.oa_id
+            if oa_id is None and key.startswith("openalex:"):
+                oa_id = key.split(":", 1)[1]
+
+            if oa_id:
+                to_fetch.append(oa_id)
+                oa_id_to_key[oa_id] = key
+
+        if not to_fetch:
+            return 0
+
+        # Batch fetch from API
+        results = self.oa.get_works_batch(to_fetch)
+
+        # Process results and cache them
+        fetched = 0
+        for oa_id, rec in results.items():
+            key = oa_id_to_key.get(oa_id)
+            if not key:
+                continue
+
+            node = self.store.get(key) or WorkNode(key=key)
+            if node.oa_id is None:
+                node.oa_id = oa_id
+                self.store.upsert(node)
+
+            if rec is None:
+                # Missing from OpenAlex
+                node.refs, node.refs_source = [], "openalex-missing"
+                self.store.upsert(node)
+                fetched += 1
+                continue
+
+            # Update node metadata from API response
+            node = self._upsert_from_oa(node, rec)
+
+            # Check if now classified as review/preprint after metadata update
+            if node.is_review or node.is_preprint:
+                node.refs, node.refs_source = [], "openalex-empty"
+                self.store.upsert(node)
+                fetched += 1
+                continue
+
+            # Extract and cache refs
+            refs: list[str] = [
+                f"openalex:{normalize_openalex_id(rid)}"
+                for rid in (rec.get("referenced_works") or [])
+            ]
+            if not refs:
+                node.refs, node.refs_source = [], "openalex-empty"
+            else:
+                node.refs, node.refs_source = refs, "openalex"
+            self.store.upsert(node)
+            fetched += 1
+
+        return fetched
 
     def expand_one(self, key: str, depth: int, metrics: Metrics) -> list[tuple[str, int]]:
         if depth >= self.max_depth:
@@ -420,7 +501,7 @@ class Traverser:
 
         return metrics
 
-    def run(self, seed_key: str) -> Metrics:
+    def run(self, seed_key: str, use_batch: bool = True) -> Metrics:
         metrics = Metrics()
         seen: set[str] = {seed_key}
         queue = deque([(seed_key, 0)])
@@ -429,60 +510,77 @@ class Traverser:
         max_depth_seen = 0
         max_seen = 50_000_000
         new_since_print = 0
+        batch_fetched = 0
 
         while queue:
-            key, depth = queue.popleft()
-            if depth > max_depth_seen:
-                max_depth_seen = depth
-            processed += 1
+            # Batch prefetch: grab upcoming items from the queue and fetch in parallel
+            if use_batch and len(queue) >= self.batch_size:
+                # Peek at the next batch of keys without removing them
+                batch_keys = [queue[i][0] for i in range(min(self.batch_size, len(queue)))]
+                fetched = self.prefetch_batch(batch_keys, metrics)
+                batch_fetched += fetched
+                if fetched > 0:
+                    metrics.expanded_openalex += fetched
 
-            if len(seen) >= max_seen:
-                logger.info(f"[STOP] reached max_seen={max_seen}")
-                queue.clear()
-                break
+            # Process a batch of items (they should now be cached)
+            items_to_process = min(self.batch_size, len(queue)) if use_batch else 1
 
-            if processed % 10000 == 0 or (time.time() - last_print) > 5:
-                now = time.time()
-                dt = now - last_print
-                rate = (new_since_print / dt) if dt > 0 else 0.0
-                hit = metrics.cache_hit
-                miss = metrics.cache_miss
-                util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
-                logger.info(
-                    f"depth={depth:2d} "
-                    f"processed={processed} "
-                    f"queue={len(queue)} seen={len(seen)} "
-                    f"expanded_oa={metrics.expanded_openalex} "
-                    f"terminal={metrics.terminal_no_refs} "
-                    f"missing_oa={metrics.missing_oa_works} "
-                    f"new/sec={rate:6.1f} "
-                    f"cache={util:5.1f}% (hit={hit} miss={miss})"
-                )
-                last_print = now
-                new_since_print = 0
+            for _ in range(items_to_process):
+                if not queue:
+                    break
 
-            try:
-                for nxt_key, nxt_depth in self.expand_one(key, depth, metrics):
-                    if nxt_key in seen:
+                key, depth = queue.popleft()
+                if depth > max_depth_seen:
+                    max_depth_seen = depth
+                processed += 1
+
+                if len(seen) >= max_seen:
+                    logger.info(f"[STOP] reached max_seen={max_seen}")
+                    queue.clear()
+                    break
+
+                if processed % 10000 == 0 or (time.time() - last_print) > 5:
+                    now = time.time()
+                    dt = now - last_print
+                    rate = (new_since_print / dt) if dt > 0 else 0.0
+                    hit = metrics.cache_hit
+                    miss = metrics.cache_miss
+                    util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
+                    logger.info(
+                        f"depth={depth:2d} "
+                        f"processed={processed} "
+                        f"queue={len(queue)} seen={len(seen)} "
+                        f"expanded_oa={metrics.expanded_openalex} "
+                        f"terminal={metrics.terminal_no_refs} "
+                        f"missing_oa={metrics.missing_oa_works} "
+                        f"new/sec={rate:6.1f} "
+                        f"cache={util:5.1f}% (hit={hit} miss={miss})"
+                    )
+                    last_print = now
+                    new_since_print = 0
+
+                try:
+                    for nxt_key, nxt_depth in self.expand_one(key, depth, metrics):
+                        if nxt_key in seen:
+                            continue
+                        seen.add(nxt_key)
+                        new_since_print += 1
+                        queue.append((nxt_key, nxt_depth))
+                except KeyboardInterrupt:
+                    raise
+                except requests.HTTPError as e:
+                    if e.response is not None and e.response.status_code in (404, 410):
+                        # treat as missing work; don't spam stderr
+                        metrics.missing_oa_works += 1
+                        metrics.terminal_no_refs += 1
+                        node = self.store.get(key) or WorkNode(key=key)
+                        node.refs = []
+                        node.refs_source = "openalex-missing"
+                        self.store.upsert(node)
                         continue
-                    seen.add(nxt_key)
-                    new_since_print += 1
-                    queue.append((nxt_key, nxt_depth))
-            except KeyboardInterrupt:
-                raise
-            except requests.HTTPError as e:
-                if e.response is not None and e.response.status_code in (404, 410):
-                    # treat as missing work; don't spam stderr
-                    metrics.missing_oa_works += 1
-                    metrics.terminal_no_refs += 1
-                    node = self.store.get(key) or WorkNode(key=key)
-                    node.refs = []
-                    node.refs_source = "openalex-missing"
-                    self.store.upsert(node)
-                    continue
-                logger.error(f"[ERROR] key={key} depth={depth} err={e}")
-            except Exception as e:
-                logger.error(f"[ERROR] key={key} depth={depth} err={e}")
+                    logger.error(f"[ERROR] key={key} depth={depth} err={e}")
+                except Exception as e:
+                    logger.error(f"[ERROR] key={key} depth={depth} err={e}")
 
         # Count eligible nodes (excluding seed) based on reached keys
         for k in seen:

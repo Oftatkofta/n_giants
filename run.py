@@ -100,12 +100,26 @@ def main() -> None:
         help="Which path summaries to print from --record-paths.",
     )
 
+    # Batch/parallel fetching options
+    ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=50,
+        help="Number of works to prefetch in parallel (BFS mode). Set to 0 to disable batching.",
+    )
+    ap.add_argument(
+        "--concurrency",
+        type=int,
+        default=30,
+        help="Max concurrent API requests (requires aiohttp).",
+    )
+
     args = ap.parse_args()
 
     if not api_key:
         raise SystemExit("Missing OPENALEX_API_KEY in environment/.env")
 
-    oa = OpenAlexClient(api_key=api_key, mailto=mailto)
+    oa = OpenAlexClient(api_key=api_key, mailto=mailto, concurrency=args.concurrency)
     store = SQLiteStore(args.db)
 
     # Resolve seed DOI -> OpenAlex Work
@@ -127,10 +141,12 @@ def main() -> None:
         oa=oa,
         max_depth=args.max_depth,
         min_year=args.min_year,
+        batch_size=args.batch_size,
     )
 
     if args.mode == "bfs":
-        metrics = t.run(seed_key)
+        use_batch = args.batch_size > 0
+        metrics = t.run(seed_key, use_batch=use_batch)
         logging.info("=== RUN COMPLETE (BFS) ===")
         logging.info("Seed DOI: %s", args.doi)
         logging.info("Seed key: %s", seed_key)

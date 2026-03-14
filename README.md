@@ -115,6 +115,10 @@ Random Walk Options:
   --walks           Number of random walks (default: 10000)
   --walk-seed       RNG seed for reproducibility
   --walk-max-steps  Max steps per walk (default: 5000)
+
+Performance Options (BFS):
+  --batch-size      Works to prefetch in parallel (default: 50, 0 to disable)
+  --concurrency     Max concurrent API requests (default: 30, requires aiohttp)
 ```
 
 ### Examples
@@ -396,7 +400,44 @@ These filters help trace the chain of *original* contributions rather than secon
 - **With API key:** 100 requests/second
 - **Polite pool (with mailto):** Higher limits, priority access
 
-The tool uses a persistent session and respects rate limits. Cached results minimize API calls on subsequent runs.
+### Parallel Fetching (BFS Mode)
+
+By default, BFS mode uses **parallel batch fetching** via `aiohttp` to maximize throughput:
+
+```bash
+# Install aiohttp for parallel fetching
+pip install aiohttp
+
+# Recommended settings for maximum throughput
+python run.py --doi "..." --mode bfs --batch-size 100 --concurrency 60
+```
+
+#### Benchmark Results
+
+Tested with DOI `10.1128/mbio.00022-22` at `--max-depth 2` (~4,300 works):
+
+| Batch Size | Concurrency | Time | Throughput |
+|------------|-------------|------|------------|
+| 0 (sequential) | 1 | ~18 min | **~4 req/s** |
+| 50 | 30 | 68s | **~44 req/s** |
+| 100 | 60 | 81s | **~53 req/s** |
+| 100 | 100 | 84s | ~51 req/s |
+
+**Key findings:**
+- **Concurrency 60** is the sweet spot (~53 req/s)
+- Higher concurrency doesn't help (OpenAlex rate limits / network overhead)
+- **~13x speedup** over single-threaded mode
+
+#### Real-World Impact
+
+For a large BFS traversal with 14 million queued items (~10% cache miss = 1.4M API calls):
+
+| Mode | Estimated Time |
+|------|----------------|
+| Sequential (~4 req/s) | **~4 days** |
+| Parallel (~53 req/s) | **~7-8 hours** |
+
+Cached results minimize API calls on subsequent runs.
 
 ---
 
