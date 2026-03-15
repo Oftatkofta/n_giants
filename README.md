@@ -61,7 +61,7 @@ Your Paper (2024)
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/n_giants.git
+   git clone https://github.com/oftatkofta/n_giants.git
    cd n_giants
    ```
 
