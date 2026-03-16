@@ -430,6 +430,8 @@ Tested with DOI `10.1128/mbio.00022-22` at `--max-depth 2` (~4,300 works):
 
 #### Real-World Impact
 
+**API Fetching (fresh cache):**
+
 For a large BFS traversal with 14 million queued items (~10% cache miss = 1.4M API calls):
 
 | Mode | Estimated Time |
@@ -437,7 +439,16 @@ For a large BFS traversal with 14 million queued items (~10% cache miss = 1.4M A
 | Sequential (~4 req/s) | **~4 days** |
 | Parallel (~53 req/s) | **~7-8 hours** |
 
-Cached results minimize API calls on subsequent runs.
+**Cached Item Processing:**
+
+When re-running on cached data, **adaptive prefetch skipping** dramatically improves performance:
+
+| Mode | 25M cached items | Rate |
+|------|------------------|------|
+| Prefetch always ON | **~87 hours** | ~80 items/sec |
+| **Adaptive skip (default)** | **~2 hours** | ~3,200 items/sec |
+
+The adaptive skip detects when cache hit rate is high (>98%) and bypasses the prefetch SQLite lookups entirely, providing a **~40x speedup** for cached traversals.
 
 ---
 

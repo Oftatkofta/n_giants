@@ -512,15 +512,33 @@ class Traverser:
         new_since_print = 0
         batch_fetched = 0
 
+        # Adaptive prefetch: skip when cache is hot
+        recent_fetches = 0
+        recent_batches = 0
+        prefetch_skip_threshold = 0.02  # Skip prefetch if <2% of recent batches needed fetching
+
         while queue:
             # Batch prefetch: grab upcoming items from the queue and fetch in parallel
-            if use_batch and len(queue) >= self.batch_size:
+            # Skip prefetching if recent batches show high cache hit rate
+            should_prefetch = use_batch and len(queue) >= self.batch_size
+            if should_prefetch and recent_batches >= 10:
+                fetch_rate = recent_fetches / recent_batches if recent_batches > 0 else 1.0
+                if fetch_rate < prefetch_skip_threshold:
+                    should_prefetch = False
+
+            if should_prefetch:
                 # Peek at the next batch of keys without removing them
                 batch_keys = [queue[i][0] for i in range(min(self.batch_size, len(queue)))]
                 fetched = self.prefetch_batch(batch_keys, metrics)
                 batch_fetched += fetched
                 if fetched > 0:
                     metrics.expanded_openalex += fetched
+                    recent_fetches += 1
+                recent_batches += 1
+                # Reset counters periodically to adapt to changing cache patterns
+                if recent_batches >= 100:
+                    recent_fetches = recent_fetches // 2
+                    recent_batches = recent_batches // 2
 
             # Process a batch of items (they should now be cached)
             items_to_process = min(self.batch_size, len(queue)) if use_batch else 1
