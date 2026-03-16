@@ -58,7 +58,12 @@ class OpenAlexClient:
             logger.warning("aiohttp not installed, falling back to sequential fetching")
             return self._get_works_batch_sequential(oa_ids)
 
-        return asyncio.run(self._get_works_batch_async(oa_ids))
+        try:
+            return asyncio.run(self._get_works_batch_async(oa_ids))
+        except KeyboardInterrupt:
+            raise
+        except asyncio.CancelledError:
+            raise KeyboardInterrupt
 
     def _get_works_batch_sequential(self, oa_ids: list[str]) -> dict[str, Optional[dict[str, Any]]]:
         """Fallback sequential fetching."""
@@ -66,6 +71,8 @@ class OpenAlexClient:
         for oa_id in oa_ids:
             try:
                 results[oa_id] = self.get_work(oa_id)
+            except KeyboardInterrupt:
+                raise
             except Exception:
                 results[oa_id] = None
         return results
@@ -103,6 +110,8 @@ class OpenAlexClient:
                         return None
                     resp.raise_for_status()
                     return await resp.json()
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 return None
 

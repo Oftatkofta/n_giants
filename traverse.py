@@ -529,7 +529,11 @@ class Traverser:
             if should_prefetch:
                 # Peek at the next batch of keys without removing them
                 batch_keys = [queue[i][0] for i in range(min(self.batch_size, len(queue)))]
-                fetched = self.prefetch_batch(batch_keys, metrics)
+                try:
+                    fetched = self.prefetch_batch(batch_keys, metrics)
+                except KeyboardInterrupt:
+                    logger.info("[INTERRUPTED] Stopping traversal...")
+                    break
                 batch_fetched += fetched
                 if fetched > 0:
                     metrics.expanded_openalex += fetched
