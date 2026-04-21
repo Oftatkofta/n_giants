@@ -530,10 +530,9 @@ class Traverser:
                 if miss_rate < prefetch_skip_threshold:
                     should_prefetch = False
 
-            # Peek at the next batch of keys
-            batch_keys = [queue[i][0] for i in range(min(self.batch_size, len(queue)))] if use_batch else []
-
             if should_prefetch:
+                # Only compute batch_keys when needed (deque[i] is O(n) per access!)
+                batch_keys = [queue[i][0] for i in range(min(self.batch_size, len(queue)))]
                 try:
                     fetched = self.prefetch_batch(batch_keys, metrics)
                 except KeyboardInterrupt:
@@ -548,10 +547,6 @@ class Traverser:
                 if recent_items_checked >= 10000:
                     recent_items_fetched = recent_items_fetched // 2
                     recent_items_checked = recent_items_checked // 2
-            # Note: bulk cache warm-up removed - on very large databases (80GB+),
-            # the IN query can be slower than individual lookups with SQLite's
-            # internal page cache. The in-memory cache will still help for
-            # repeated accesses within the same batch.
 
             # Process a batch of items (they should now be cached in memory)
             items_to_process = min(self.batch_size, len(queue)) if use_batch else 1
