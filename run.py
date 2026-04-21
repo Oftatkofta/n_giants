@@ -113,6 +113,12 @@ def main() -> None:
         default=30,
         help="Max concurrent API requests (requires aiohttp).",
     )
+    ap.add_argument(
+        "--mmap-gb",
+        type=int,
+        default=8,
+        help="SQLite memory-map size in GB. Set to 0 to disable mmap. Use higher values (e.g. 80) if you have plenty of RAM.",
+    )
 
     args = ap.parse_args()
 
@@ -120,7 +126,7 @@ def main() -> None:
         raise SystemExit("Missing OPENALEX_API_KEY in environment/.env")
 
     oa = OpenAlexClient(api_key=api_key, mailto=mailto, concurrency=args.concurrency)
-    store = SQLiteStore(args.db)
+    store = SQLiteStore(args.db, mmap_gb=args.mmap_gb)
 
     # Resolve seed DOI -> OpenAlex Work
     doi = args.doi

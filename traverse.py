@@ -548,10 +548,10 @@ class Traverser:
                 if recent_items_checked >= 10000:
                     recent_items_fetched = recent_items_fetched // 2
                     recent_items_checked = recent_items_checked // 2
-            elif batch_keys:
-                # Even when skipping API prefetch, warm up the in-memory cache
-                # with a single bulk SQLite lookup (much faster than N lookups)
-                self.store.get_batch(batch_keys)
+            # Note: bulk cache warm-up removed - on very large databases (80GB+),
+            # the IN query can be slower than individual lookups with SQLite's
+            # internal page cache. The in-memory cache will still help for
+            # repeated accesses within the same batch.
 
             # Process a batch of items (they should now be cached in memory)
             items_to_process = min(self.batch_size, len(queue)) if use_batch else 1

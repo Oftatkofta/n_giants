@@ -19,12 +19,15 @@ class SQLiteStore:
       - edges: citation edges (optionally with depth + source)
     """
 
-    def __init__(self, path: str = "shoulders_cache.sqlite", cache_size_mb: int = 128):
+    def __init__(self, path: str = "shoulders_cache.sqlite", cache_size_mb: int = 128, mmap_gb: int = 8):
         self.path = path
         self.conn = sqlite3.connect(path)
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
         self.conn.execute(f"PRAGMA cache_size = -{cache_size_mb * 1024};")  # Negative = KB
+        if mmap_gb > 0:
+            mmap_bytes = mmap_gb * 1024 * 1024 * 1024
+            self.conn.execute(f"PRAGMA mmap_size = {mmap_bytes};")
         self._init_schema()
         # In-memory LRU cache for hot items
         self._cache: dict[str, Optional[WorkNode]] = {}

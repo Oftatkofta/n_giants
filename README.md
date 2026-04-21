@@ -108,8 +108,10 @@ DFS/Hybrid Options:
   --dfs-order       Child ordering: as-listed, year (oldest-first), random
   --dfs-limit       Max nodes to visit (default: 100)
   --stop-on-terminal  Stop after reaching first terminal node
+  --stop-on-missing   Treat missing OpenAlex works as terminal (cleaner paths)
   --record-paths    Output file for terminal paths (JSONL format)
   --paths-top-k     Number of paths to show in summary (default: 10)
+  --paths-show      Which summaries: both, deepest, oldest, none (default: both)
 
 Random Walk Options:
   --walks           Number of random walks (default: 10000)
@@ -119,6 +121,7 @@ Random Walk Options:
 Performance Options (BFS):
   --batch-size      Works to prefetch in parallel (default: 50, 0 to disable)
   --concurrency     Max concurrent API requests (default: 30, requires aiohttp)
+  --mmap-gb         SQLite memory-map size in GB (default: 8, 0 to disable)
 ```
 
 ### Examples
@@ -410,7 +413,24 @@ pip install aiohttp
 
 # Recommended settings for maximum throughput
 python run.py --doi "..." --mode bfs --batch-size 100 --concurrency 60
+
+# For large databases (50GB+) on servers with plenty of RAM:
+# Set --mmap-gb to cover the entire database size
+python run.py --doi "..." --mode bfs --batch-size 100 --concurrency 60 --mmap-gb 100
 ```
+
+#### Memory-Mapped I/O (`--mmap-gb`)
+
+For large databases, SQLite's memory-mapped I/O can dramatically improve read performance:
+
+- **How it works:** The database file is mapped directly into memory. The OS caches pages as they're accessed.
+- **Default (8GB):** Suitable for most cases.
+- **Large databases:** Set `--mmap-gb` to your database size (or larger). Example: for an 80GB database, use `--mmap-gb 100`.
+- **RAM usage:** This uses the OS page cache ("buff/cache" in `free -h`), which is automatically released if other processes need memory.
+- **First run:** Will be slow as data is read from disk into cache.
+- **Subsequent runs:** Near-instant lookups from cached pages.
+
+Check available memory with `free -h` — the "available" column shows how much can be used for caching.
 
 #### Benchmark Results
 
