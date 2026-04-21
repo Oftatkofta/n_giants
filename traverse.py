@@ -131,12 +131,15 @@ class Traverser:
         Pre-fetch a batch of works in parallel and cache them.
         Returns the number of works actually fetched from the API.
         """
+        # Bulk lookup: single query instead of N queries
+        cached_nodes = self.store.get_batch(keys)
+
         # Filter to keys that need fetching (not already cached with refs)
         to_fetch: list[str] = []
         oa_id_to_key: dict[str, str] = {}
 
         for key in keys:
-            node = self.store.get(key) or WorkNode(key=key)
+            node = cached_nodes.get(key) or WorkNode(key=key)
 
             # Skip if already cached
             if node.refs is not None and node.refs_source in ("openalex", "openalex-empty", "openalex-missing"):
@@ -527,9 +530,10 @@ class Traverser:
                 if miss_rate < prefetch_skip_threshold:
                     should_prefetch = False
 
+            # Peek at the next batch of keys
+            batch_keys = [queue[i][0] for i in range(min(self.batch_size, len(queue)))] if use_batch else []
+
             if should_prefetch:
-                # Peek at the next batch of keys without removing them
-                batch_keys = [queue[i][0] for i in range(min(self.batch_size, len(queue)))]
                 try:
                     fetched = self.prefetch_batch(batch_keys, metrics)
                 except KeyboardInterrupt:
@@ -544,8 +548,12 @@ class Traverser:
                 if recent_items_checked >= 10000:
                     recent_items_fetched = recent_items_fetched // 2
                     recent_items_checked = recent_items_checked // 2
+            elif batch_keys:
+                # Even when skipping API prefetch, warm up the in-memory cache
+                # with a single bulk SQLite lookup (much faster than N lookups)
+                self.store.get_batch(batch_keys)
 
-            # Process a batch of items (they should now be cached)
+            # Process a batch of items (they should now be cached in memory)
             items_to_process = min(self.batch_size, len(queue)) if use_batch else 1
 
             for _ in range(items_to_process):
