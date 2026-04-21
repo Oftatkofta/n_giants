@@ -516,13 +516,13 @@ class Traverser:
         # Track actual items fetched vs items checked (not batches)
         recent_items_fetched = 0
         recent_items_checked = 0
-        prefetch_skip_threshold = 0.02  # Skip prefetch if <2% of recent items needed fetching
+        prefetch_skip_threshold = 0.05  # Skip prefetch if <5% of recent items needed fetching
 
         while queue:
             # Batch prefetch: grab upcoming items from the queue and fetch in parallel
             # Skip prefetching if recent cache miss rate is low
             should_prefetch = use_batch and len(queue) >= self.batch_size
-            if should_prefetch and recent_items_checked >= 500:
+            if should_prefetch and recent_items_checked >= 100:
                 miss_rate = recent_items_fetched / recent_items_checked if recent_items_checked > 0 else 1.0
                 if miss_rate < prefetch_skip_threshold:
                     should_prefetch = False
