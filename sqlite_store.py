@@ -73,9 +73,9 @@ class SQLiteStore:
             );
             """
         )
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_key);"
-        )
+        # src_key is the leading column of the edges PRIMARY KEY, so lookups by
+        # src_key already use that index. Do not add a separate index here —
+        # on a 100GB+ database it can take hours at startup with no feedback.
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS bfs_checkpoint (

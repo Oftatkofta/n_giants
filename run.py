@@ -137,9 +137,12 @@ def main() -> None:
         raise SystemExit("Missing OPENALEX_API_KEY in environment/.env")
 
     oa = OpenAlexClient(api_key=api_key, mailto=mailto, concurrency=args.concurrency)
+    logging.info("Opening cache database: %s (mmap=%s GB)", args.db, args.mmap_gb)
     store = SQLiteStore(args.db, mmap_gb=args.mmap_gb)
+    logging.info("Cache database ready.")
 
     # Resolve seed DOI -> OpenAlex Work
+    logging.info("Resolving seed DOI via OpenAlex: %s", args.doi)
     doi = args.doi
     rec = oa.resolve_doi(doi)
     if not rec:
@@ -163,6 +166,7 @@ def main() -> None:
 
     if args.mode == "bfs":
         use_batch = args.batch_size > 0
+        logging.info("Starting BFS traversal (batch_size=%s, resume=%s)", args.batch_size, args.resume)
         metrics = t.run(
             seed_key,
             use_batch=use_batch,
