@@ -1,6 +1,7 @@
 import os
 import tempfile
 
+from bfs_checkpoint import BfsCheckpoint
 from core import WorkNode
 from sqlite_store import SQLiteStore
 from traverse import Metrics, Traverser
@@ -20,7 +21,44 @@ class FakeOA:
         return None
 
 
-def test_bfs_checkpoint_roundtrip():
+def test_bfs_checkpoint_sidecar_roundtrip():
+    fd, path = tempfile.mkstemp(suffix=".sqlite")
+    os.close(fd)
+    sidecar_paths = [
+        f"{path}.bfs.seen.journal",
+        f"{path}.bfs.queue.pkl",
+        f"{path}.bfs.meta.json",
+    ]
+
+    try:
+        cp = BfsCheckpoint(path)
+        cp.init_fresh_run("openalex:W1")
+        cp.open_journal_append()
+        cp.journal_seen("openalex:W2")
+        cp.journal_seen("openalex:W3")
+        cp.save(
+            "openalex:W1",
+            10,
+            0,
+            processed=2,
+            queue=[("openalex:W3", 1), ("openalex:W4", 2)],
+        )
+
+        loaded = cp.load("openalex:W1", 10, 0)
+        assert loaded is not None
+        assert loaded["processed"] == 2
+        assert loaded["queue"] == [("openalex:W3", 1), ("openalex:W4", 2)]
+        assert loaded["seen"] == {"openalex:W1", "openalex:W2", "openalex:W3"}
+    finally:
+        os.remove(path)
+        for sidecar in sidecar_paths:
+            try:
+                os.remove(sidecar)
+            except FileNotFoundError:
+                pass
+
+
+def test_bfs_checkpoint_resume_traversal():
     fd, path = tempfile.mkstemp(suffix=".sqlite")
     os.close(fd)
 
@@ -62,27 +100,31 @@ def test_bfs_checkpoint_roundtrip():
         store.upsert(WorkNode(key="openalex:W1", oa_id="W1"))
         t = Traverser(store, oa=fake, max_depth=10, batch_size=1)
 
-        store.save_bfs_checkpoint(
+        cp = BfsCheckpoint(path)
+        cp.init_fresh_run("openalex:W1")
+        cp.open_journal_append()
+        cp.journal_seen("openalex:W1")
+        cp.journal_seen("openalex:W2")
+        cp.journal_seen("openalex:W3")
+        cp.journal_seen("openalex:W4")
+        cp.save(
             "openalex:W1",
             10,
             0,
             processed=2,
             queue=[("openalex:W3", 1), ("openalex:W4", 2)],
-            seen={"openalex:W1", "openalex:W2", "openalex:W3", "openalex:W4"},
         )
 
-        loaded = store.load_bfs_checkpoint("openalex:W1", 10, 0)
-        assert loaded is not None
-        assert loaded["processed"] == 2
-        assert loaded["queue"] == [("openalex:W3", 1), ("openalex:W4", 2)]
-        assert loaded["seen"] == {"openalex:W1", "openalex:W2", "openalex:W3", "openalex:W4"}
-
-        metrics = t.run("openalex:W1", use_batch=False, resume=True, checkpoint_interval_sec=9999)
+        metrics = t.run("openalex:W1", use_batch=False, resume=True, checkpoint_interval_sec=0)
         assert metrics.counted == 3
-        assert store.load_bfs_checkpoint("openalex:W1", 10, 0) is None
         store.close()
     finally:
         os.remove(path)
+        for suffix in (".bfs.seen.journal", ".bfs.queue.pkl", ".bfs.meta.json"):
+            try:
+                os.remove(path + suffix)
+            except FileNotFoundError:
+                pass
 
 
 def test_warm_cache_skips_cached_keys():

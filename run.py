@@ -122,13 +122,16 @@ def main() -> None:
     ap.add_argument(
         "--resume",
         action="store_true",
-        help="Resume an interrupted BFS run from the last checkpoint in the SQLite DB.",
+        help="Resume an interrupted BFS run from the last checkpoint (sidecar files next to --db).",
     )
     ap.add_argument(
         "--checkpoint-interval",
         type=int,
-        default=300,
-        help="Seconds between automatic BFS checkpoint saves (default: 300).",
+        default=0,
+        help=(
+            "Seconds between automatic BFS checkpoint saves (default: 0 = disabled). "
+            "Checkpoints are always saved on Ctrl+C. Large queues make periodic saves very expensive."
+        ),
     )
 
     args = ap.parse_args()

@@ -214,6 +214,9 @@ shoulders_cache.sqlite-wal
 shoulders_cache.sqlite
 shoulders_cache.sqlite
 *.sqlite
+*.bfs.seen.journal
+*.bfs.queue.pkl
+*.bfs.meta.json
 dfs_paths.jsonl
 hybrid_paths.json
 walk.log2

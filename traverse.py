@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import random
+import signal
 import time
 from collections import Counter, deque
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from typing import Any, Literal
 
 import requests
 
+from bfs_checkpoint import BfsCheckpoint
 from core import WorkNode, canonical_key, classify_review_preprint, normalize_openalex_id
 from helpers import open_paths_writer, emit_terminal
 from store import Store
@@ -526,7 +528,7 @@ class Traverser:
         seed_key: str,
         use_batch: bool = True,
         resume: bool = False,
-        checkpoint_interval_sec: float = 300.0,
+        checkpoint_interval_sec: float = 0.0,
     ) -> Metrics:
         metrics = Metrics()
         processed = 0
@@ -536,27 +538,34 @@ class Traverser:
         new_since_print = 0
         batch_fetched = 0
         last_checkpoint = time.time()
+        checkpoint = BfsCheckpoint(getattr(self.store, "path", "shoulders_cache.sqlite"))
+        checkpoint_enabled = checkpoint_interval_sec > 0
 
-        if resume and hasattr(self.store, "load_bfs_checkpoint"):
-            checkpoint = self.store.load_bfs_checkpoint(seed_key, self.max_depth, self.min_year)
-            if checkpoint:
-                seen: set[str] = set(checkpoint["seen"])  # type: ignore[arg-type]
-                queue = deque(checkpoint["queue"])  # type: ignore[arg-type]
-                processed = int(checkpoint["processed"])  # type: ignore[arg-type]
+        if resume:
+            loaded = checkpoint.load(seed_key, self.max_depth, self.min_year, legacy_store=self.store)
+            if loaded:
+                seen: set[str] = set(loaded["seen"])  # type: ignore[arg-type]
+                queue = deque(loaded["queue"])  # type: ignore[arg-type]
+                processed = int(loaded["processed"])  # type: ignore[arg-type]
+                checkpoint.open_journal_append()
                 logger.info(
                     "Resuming BFS from checkpoint: processed=%s queue=%s seen=%s updated_at=%s",
                     processed,
                     len(queue),
                     len(seen),
-                    checkpoint["updated_at"],
+                    loaded["updated_at"],
                 )
             else:
                 logger.warning("No BFS checkpoint found; starting from seed.")
                 seen = {seed_key}
                 queue = deque([(seed_key, 0)])
+                checkpoint.init_fresh_run(seed_key)
+                checkpoint.open_journal_append()
         else:
             seen = {seed_key}
             queue = deque([(seed_key, 0)])
+            checkpoint.init_fresh_run(seed_key)
+            checkpoint.open_journal_append()
 
         # Adaptive prefetch: skip when cache is hot
         # Track actual items fetched vs items checked (not batches)
@@ -566,7 +575,7 @@ class Traverser:
 
         def maybe_save_checkpoint(force: bool = False) -> None:
             nonlocal last_checkpoint
-            if not hasattr(self.store, "save_bfs_checkpoint"):
+            if not force and not checkpoint_enabled:
                 return
             now = time.time()
             if not force and (now - last_checkpoint) < checkpoint_interval_sec:
@@ -577,17 +586,31 @@ class Traverser:
                 len(queue),
                 len(seen),
             )
-            self.store.save_bfs_checkpoint(
+            checkpoint.save(
                 seed_key,
                 self.max_depth,
                 self.min_year,
                 processed,
                 list(queue),
-                seen,
             )
             last_checkpoint = now
 
         interrupted = False
+        interrupt_save = True
+
+        def _handle_interrupt(signum, frame) -> None:
+            nonlocal interrupted, interrupt_save
+            if interrupted and not interrupt_save:
+                logger.warning("Forced exit without saving checkpoint.")
+                raise SystemExit(130)
+            if interrupted:
+                interrupt_save = False
+                logger.warning("Second interrupt: exiting WITHOUT checkpoint save.")
+                raise SystemExit(130)
+            interrupted = True
+            logger.info("Interrupt received: stopping traversal (Ctrl+C again to exit without saving)...")
+
+        prev_handler = signal.signal(signal.SIGINT, _handle_interrupt)
 
         try:
             while queue:
@@ -609,9 +632,6 @@ class Traverser:
                         fetched = self.prefetch_batch(batch_keys, metrics)
                     except KeyboardInterrupt:
                         interrupted = True
-                        maybe_save_checkpoint(force=True)
-                        logger.info("[INTERRUPTED] Checkpoint saved. Re-run with --resume to continue.")
-                        queue.clear()
                         break
                     batch_fetched += fetched
                     if fetched > 0:
@@ -670,13 +690,11 @@ class Traverser:
                             if nxt_key in seen:
                                 continue
                             seen.add(nxt_key)
+                            checkpoint.journal_seen(nxt_key)
                             new_since_print += 1
                             queue.append((nxt_key, nxt_depth))
                     except KeyboardInterrupt:
                         interrupted = True
-                        maybe_save_checkpoint(force=True)
-                        logger.info("[INTERRUPTED] Checkpoint saved. Re-run with --resume to continue.")
-                        queue.clear()
                         break
                     except requests.HTTPError as e:
                         if e.response is not None and e.response.status_code in (404, 410):
@@ -696,12 +714,21 @@ class Traverser:
                     break
         except KeyboardInterrupt:
             interrupted = True
-            maybe_save_checkpoint(force=True)
-            logger.info("[INTERRUPTED] Checkpoint saved. Re-run with --resume to continue.")
+        finally:
+            signal.signal(signal.SIGINT, prev_handler)
 
-        if not interrupted and not queue and hasattr(self.store, "clear_bfs_checkpoint"):
-            self.store.clear_bfs_checkpoint(seed_key, self.max_depth, self.min_year)
+        if interrupted and interrupt_save:
+            maybe_save_checkpoint(force=True)
+            logger.info("[INTERRUPTED] Checkpoint saved to sidecar files. Re-run with --resume to continue.")
+        elif interrupted:
+            logger.info("[INTERRUPTED] Exited without saving checkpoint.")
+
+        if not interrupted and not queue:
+            checkpoint.close_journal()
+            checkpoint.clear_run(seed_key, self.max_depth, self.min_year, legacy_store=self.store)
             logger.info("BFS complete; checkpoint cleared.")
+        else:
+            checkpoint.close_journal()
 
         # Count eligible nodes (excluding seed) based on reached keys
         for k in seen:
