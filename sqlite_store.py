@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from functools import lru_cache
 from typing import Optional
 
 from core import WorkNode
@@ -31,7 +30,7 @@ class SQLiteStore:
         self._init_schema()
         # In-memory LRU cache for hot items
         self._cache: dict[str, Optional[WorkNode]] = {}
-        self._cache_max = 100_000  # Keep up to 100k items in memory
+        self._cache_max = 500_000  # Keep up to 500k items in memory
 
     def __enter__(self):
         return self
@@ -71,6 +70,41 @@ class SQLiteStore:
               depth INTEGER,
               source TEXT,
               PRIMARY KEY (src_key, dst_key, depth, source)
+            );
+            """
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_key);"
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bfs_checkpoint (
+              run_id TEXT PRIMARY KEY,
+              seed_key TEXT NOT NULL,
+              max_depth INTEGER NOT NULL,
+              min_year INTEGER NOT NULL,
+              processed INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bfs_queue (
+              run_id TEXT NOT NULL,
+              seq INTEGER NOT NULL,
+              key TEXT NOT NULL,
+              depth INTEGER NOT NULL,
+              PRIMARY KEY (run_id, seq)
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bfs_seen (
+              run_id TEXT NOT NULL,
+              key TEXT NOT NULL,
+              PRIMARY KEY (run_id, key)
             );
             """
         )
@@ -227,9 +261,138 @@ class SQLiteStore:
 
         return result
 
+    def warm_cache(self, keys: list[str], chunk_size: int = 25) -> None:
+        """
+        Load works into the in-memory cache ahead of processing.
+
+        Only queries SQLite for keys not already cached. Uses small IN-query
+        chunks so large databases (100GB+) stay fast.
+        """
+        uncached = [key for key in keys if key not in self._cache]
+        if not uncached:
+            return
+        for i in range(0, len(uncached), chunk_size):
+            self.get_batch(uncached[i : i + chunk_size])
+
     def add_edge(self, src: str, dst: str, depth: int, source: str) -> None:
         self.conn.execute(
             "INSERT OR IGNORE INTO edges(src_key, dst_key, depth, source) VALUES (?, ?, ?, ?)",
             (src, dst, depth, source),
         )
+        self.conn.commit()
+
+    def add_edges(self, edges: list[tuple[str, str, int, str]]) -> None:
+        if not edges:
+            return
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO edges(src_key, dst_key, depth, source) VALUES (?, ?, ?, ?)",
+            edges,
+        )
+        self.conn.commit()
+
+    def has_outgoing_edges(self, key: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM edges WHERE src_key=? LIMIT 1",
+            (key,),
+        ).fetchone()
+        return row is not None
+
+    def upsert_placeholders(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        now = int(time.time())
+        rows = [(key, now) for key in keys]
+        self.conn.executemany(
+            """
+            INSERT INTO works (key, updated_at)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO NOTHING
+            """,
+            rows,
+        )
+        self.conn.commit()
+
+    @staticmethod
+    def bfs_run_id(seed_key: str, max_depth: int, min_year: int) -> str:
+        return f"{seed_key}|d{max_depth}|y{min_year}"
+
+    def save_bfs_checkpoint(
+        self,
+        seed_key: str,
+        max_depth: int,
+        min_year: int,
+        processed: int,
+        queue: list[tuple[str, int]],
+        seen: set[str],
+    ) -> None:
+        run_id = self.bfs_run_id(seed_key, max_depth, min_year)
+        now = int(time.time())
+        self.conn.execute("DELETE FROM bfs_queue WHERE run_id=?", (run_id,))
+        self.conn.execute("DELETE FROM bfs_seen WHERE run_id=?", (run_id,))
+        self.conn.executemany(
+            "INSERT INTO bfs_queue(run_id, seq, key, depth) VALUES (?, ?, ?, ?)",
+            [(run_id, i, key, depth) for i, (key, depth) in enumerate(queue)],
+        )
+        self.conn.executemany(
+            "INSERT INTO bfs_seen(run_id, key) VALUES (?, ?)",
+            [(run_id, key) for key in seen],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO bfs_checkpoint(run_id, seed_key, max_depth, min_year, processed, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+              processed=excluded.processed,
+              updated_at=excluded.updated_at
+            """,
+            (run_id, seed_key, max_depth, min_year, processed, now),
+        )
+        self.conn.commit()
+
+    def load_bfs_checkpoint(
+        self, seed_key: str, max_depth: int, min_year: int
+    ) -> Optional[dict[str, object]]:
+        run_id = self.bfs_run_id(seed_key, max_depth, min_year)
+        row = self.conn.execute(
+            """
+            SELECT seed_key, max_depth, min_year, processed, updated_at
+            FROM bfs_checkpoint WHERE run_id=?
+            """,
+            (run_id,),
+        ).fetchone()
+        if not row:
+            return None
+        if row[0] != seed_key or row[1] != max_depth or row[2] != min_year:
+            return None
+
+        queue = [
+            (key, depth)
+            for key, depth in self.conn.execute(
+                "SELECT key, depth FROM bfs_queue WHERE run_id=? ORDER BY seq",
+                (run_id,),
+            ).fetchall()
+        ]
+        seen = {
+            key
+            for (key,) in self.conn.execute(
+                "SELECT key FROM bfs_seen WHERE run_id=?",
+                (run_id,),
+            ).fetchall()
+        }
+        return {
+            "run_id": run_id,
+            "seed_key": row[0],
+            "max_depth": row[1],
+            "min_year": row[2],
+            "processed": row[3],
+            "updated_at": row[4],
+            "queue": queue,
+            "seen": seen,
+        }
+
+    def clear_bfs_checkpoint(self, seed_key: str, max_depth: int, min_year: int) -> None:
+        run_id = self.bfs_run_id(seed_key, max_depth, min_year)
+        self.conn.execute("DELETE FROM bfs_queue WHERE run_id=?", (run_id,))
+        self.conn.execute("DELETE FROM bfs_seen WHERE run_id=?", (run_id,))
+        self.conn.execute("DELETE FROM bfs_checkpoint WHERE run_id=?", (run_id,))
         self.conn.commit()

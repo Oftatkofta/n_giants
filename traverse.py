@@ -215,13 +215,30 @@ class Traverser:
         refs, src = self.ensure_refs_cached(key, metrics)
         if not refs:
             return []
-        next_items: list[tuple[str, int]] = []
-        for rkey in refs:
-            self.store.add_edge(key, rkey, depth + 1, src)
-            if not self.store.get(rkey):
-                self.store.upsert(WorkNode(key=rkey))
-            next_items.append((rkey, depth + 1))
-        return next_items
+
+        already_expanded = hasattr(self.store, "has_outgoing_edges") and self.store.has_outgoing_edges(key)
+        if not already_expanded:
+            edges = [(key, rkey, depth + 1, src) for rkey in refs]
+            if hasattr(self.store, "add_edges"):
+                self.store.add_edges(edges)
+            else:
+                for edge in edges:
+                    self.store.add_edge(*edge)
+
+            if hasattr(self.store, "get_batch"):
+                cached = self.store.get_batch(refs)
+                missing = [rkey for rkey in refs if cached.get(rkey) is None]
+            else:
+                missing = [rkey for rkey in refs if not self.store.get(rkey)]
+
+            if missing:
+                if hasattr(self.store, "upsert_placeholders"):
+                    self.store.upsert_placeholders(missing)
+                else:
+                    for rkey in missing:
+                        self.store.upsert(WorkNode(key=rkey))
+
+        return [(rkey, depth + 1) for rkey in refs]
 
     def random_walk_once(self, seed_key: str, rng: random.Random, max_steps: int, metrics: Metrics) -> tuple[int, str]:
         cur = seed_key
@@ -504,16 +521,42 @@ class Traverser:
 
         return metrics
 
-    def run(self, seed_key: str, use_batch: bool = True) -> Metrics:
+    def run(
+        self,
+        seed_key: str,
+        use_batch: bool = True,
+        resume: bool = False,
+        checkpoint_interval_sec: float = 300.0,
+    ) -> Metrics:
         metrics = Metrics()
-        seen: set[str] = {seed_key}
-        queue = deque([(seed_key, 0)])
         processed = 0
         last_print = time.time()
         max_depth_seen = 0
         max_seen = 50_000_000
         new_since_print = 0
         batch_fetched = 0
+        last_checkpoint = time.time()
+
+        if resume and hasattr(self.store, "load_bfs_checkpoint"):
+            checkpoint = self.store.load_bfs_checkpoint(seed_key, self.max_depth, self.min_year)
+            if checkpoint:
+                seen: set[str] = set(checkpoint["seen"])  # type: ignore[arg-type]
+                queue = deque(checkpoint["queue"])  # type: ignore[arg-type]
+                processed = int(checkpoint["processed"])  # type: ignore[arg-type]
+                logger.info(
+                    "Resuming BFS from checkpoint: processed=%s queue=%s seen=%s updated_at=%s",
+                    processed,
+                    len(queue),
+                    len(seen),
+                    checkpoint["updated_at"],
+                )
+            else:
+                logger.warning("No BFS checkpoint found; starting from seed.")
+                seen = {seed_key}
+                queue = deque([(seed_key, 0)])
+        else:
+            seen = {seed_key}
+            queue = deque([(seed_key, 0)])
 
         # Adaptive prefetch: skip when cache is hot
         # Track actual items fetched vs items checked (not batches)
@@ -521,92 +564,144 @@ class Traverser:
         recent_items_checked = 0
         prefetch_skip_threshold = 0.05  # Skip prefetch if <5% of recent items needed fetching
 
-        while queue:
-            # Batch prefetch: grab upcoming items from the queue and fetch in parallel
-            # Skip prefetching if recent cache miss rate is low
-            should_prefetch = use_batch and len(queue) >= self.batch_size
-            if should_prefetch and recent_items_checked >= 100:
-                miss_rate = recent_items_fetched / recent_items_checked if recent_items_checked > 0 else 1.0
-                if miss_rate < prefetch_skip_threshold:
-                    should_prefetch = False
+        def maybe_save_checkpoint(force: bool = False) -> None:
+            nonlocal last_checkpoint
+            if not hasattr(self.store, "save_bfs_checkpoint"):
+                return
+            now = time.time()
+            if not force and (now - last_checkpoint) < checkpoint_interval_sec:
+                return
+            logger.info(
+                "Saving BFS checkpoint: processed=%s queue=%s seen=%s",
+                processed,
+                len(queue),
+                len(seen),
+            )
+            self.store.save_bfs_checkpoint(
+                seed_key,
+                self.max_depth,
+                self.min_year,
+                processed,
+                list(queue),
+                seen,
+            )
+            last_checkpoint = now
 
-            if should_prefetch:
-                # Only compute batch_keys when needed (deque[i] is O(n) per access!)
-                batch_keys = [queue[i][0] for i in range(min(self.batch_size, len(queue)))]
-                try:
-                    fetched = self.prefetch_batch(batch_keys, metrics)
-                except KeyboardInterrupt:
-                    logger.info("[INTERRUPTED] Stopping traversal...")
-                    break
-                batch_fetched += fetched
-                if fetched > 0:
-                    metrics.expanded_openalex += fetched
-                recent_items_fetched += fetched
-                recent_items_checked += len(batch_keys)
-                # Reset counters periodically to adapt to changing cache patterns
-                if recent_items_checked >= 10000:
-                    recent_items_fetched = recent_items_fetched // 2
-                    recent_items_checked = recent_items_checked // 2
+        interrupted = False
 
-            # Process a batch of items (they should now be cached in memory)
-            items_to_process = min(self.batch_size, len(queue)) if use_batch else 1
+        try:
+            while queue:
+                # Batch prefetch: grab upcoming items from the queue and fetch in parallel
+                # Skip prefetching if recent cache miss rate is low
+                should_prefetch = use_batch and len(queue) >= self.batch_size
+                if should_prefetch and recent_items_checked >= 100:
+                    miss_rate = recent_items_fetched / recent_items_checked if recent_items_checked > 0 else 1.0
+                    if miss_rate < prefetch_skip_threshold:
+                        should_prefetch = False
 
-            for _ in range(items_to_process):
-                if not queue:
-                    break
+                batch_keys: list[str] = []
+                if use_batch and len(queue) >= self.batch_size:
+                    # Left-side deque peek only; indices 0..batch_size-1 are O(k) total.
+                    batch_keys = [queue[i][0] for i in range(min(self.batch_size, len(queue)))]
 
-                key, depth = queue.popleft()
-                if depth > max_depth_seen:
-                    max_depth_seen = depth
-                processed += 1
+                if should_prefetch and batch_keys:
+                    try:
+                        fetched = self.prefetch_batch(batch_keys, metrics)
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        maybe_save_checkpoint(force=True)
+                        logger.info("[INTERRUPTED] Checkpoint saved. Re-run with --resume to continue.")
+                        queue.clear()
+                        break
+                    batch_fetched += fetched
+                    if fetched > 0:
+                        metrics.expanded_openalex += fetched
+                    recent_items_fetched += fetched
+                    recent_items_checked += len(batch_keys)
+                    # Reset counters periodically to adapt to changing cache patterns
+                    if recent_items_checked >= 10000:
+                        recent_items_fetched = recent_items_fetched // 2
+                        recent_items_checked = recent_items_checked // 2
+                elif batch_keys and hasattr(self.store, "warm_cache"):
+                    # Cache-hot replay path: bulk-load upcoming nodes into memory
+                    # without hitting the OpenAlex API (restores ~3000+/sec replay).
+                    self.store.warm_cache(batch_keys)
 
-                if len(seen) >= max_seen:
-                    logger.info(f"[STOP] reached max_seen={max_seen}")
-                    queue.clear()
-                    break
+                # Process a batch of items (they should now be cached in memory)
+                items_to_process = min(self.batch_size, len(queue)) if use_batch else 1
 
-                if processed % 10000 == 0 or (time.time() - last_print) > 5:
-                    now = time.time()
-                    dt = now - last_print
-                    rate = (new_since_print / dt) if dt > 0 else 0.0
-                    hit = metrics.cache_hit
-                    miss = metrics.cache_miss
-                    util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
-                    logger.info(
-                        f"depth={depth:2d} "
-                        f"processed={processed} "
-                        f"queue={len(queue)} seen={len(seen)} "
-                        f"expanded_oa={metrics.expanded_openalex} "
-                        f"terminal={metrics.terminal_no_refs} "
-                        f"missing_oa={metrics.missing_oa_works} "
-                        f"new/sec={rate:6.1f} "
-                        f"cache={util:5.1f}% (hit={hit} miss={miss})"
-                    )
-                    last_print = now
-                    new_since_print = 0
+                for _ in range(items_to_process):
+                    if not queue:
+                        break
 
-                try:
-                    for nxt_key, nxt_depth in self.expand_one(key, depth, metrics):
-                        if nxt_key in seen:
+                    key, depth = queue.popleft()
+                    if depth > max_depth_seen:
+                        max_depth_seen = depth
+                    processed += 1
+
+                    if len(seen) >= max_seen:
+                        logger.info(f"[STOP] reached max_seen={max_seen}")
+                        queue.clear()
+                        break
+
+                    if processed % 10000 == 0 or (time.time() - last_print) > 5:
+                        now = time.time()
+                        dt = now - last_print
+                        rate = (new_since_print / dt) if dt > 0 else 0.0
+                        hit = metrics.cache_hit
+                        miss = metrics.cache_miss
+                        util = (hit / (hit + miss) * 100.0) if (hit + miss) else 0.0
+                        logger.info(
+                            f"depth={depth:2d} "
+                            f"processed={processed} "
+                            f"queue={len(queue)} seen={len(seen)} "
+                            f"expanded_oa={metrics.expanded_openalex} "
+                            f"terminal={metrics.terminal_no_refs} "
+                            f"missing_oa={metrics.missing_oa_works} "
+                            f"new/sec={rate:6.1f} "
+                            f"cache={util:5.1f}% (hit={hit} miss={miss})"
+                        )
+                        last_print = now
+                        new_since_print = 0
+                        maybe_save_checkpoint()
+
+                    try:
+                        for nxt_key, nxt_depth in self.expand_one(key, depth, metrics):
+                            if nxt_key in seen:
+                                continue
+                            seen.add(nxt_key)
+                            new_since_print += 1
+                            queue.append((nxt_key, nxt_depth))
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        maybe_save_checkpoint(force=True)
+                        logger.info("[INTERRUPTED] Checkpoint saved. Re-run with --resume to continue.")
+                        queue.clear()
+                        break
+                    except requests.HTTPError as e:
+                        if e.response is not None and e.response.status_code in (404, 410):
+                            # treat as missing work; don't spam stderr
+                            metrics.missing_oa_works += 1
+                            metrics.terminal_no_refs += 1
+                            node = self.store.get(key) or WorkNode(key=key)
+                            node.refs = []
+                            node.refs_source = "openalex-missing"
+                            self.store.upsert(node)
                             continue
-                        seen.add(nxt_key)
-                        new_since_print += 1
-                        queue.append((nxt_key, nxt_depth))
-                except KeyboardInterrupt:
-                    raise
-                except requests.HTTPError as e:
-                    if e.response is not None and e.response.status_code in (404, 410):
-                        # treat as missing work; don't spam stderr
-                        metrics.missing_oa_works += 1
-                        metrics.terminal_no_refs += 1
-                        node = self.store.get(key) or WorkNode(key=key)
-                        node.refs = []
-                        node.refs_source = "openalex-missing"
-                        self.store.upsert(node)
-                        continue
-                    logger.error(f"[ERROR] key={key} depth={depth} err={e}")
-                except Exception as e:
-                    logger.error(f"[ERROR] key={key} depth={depth} err={e}")
+                        logger.error(f"[ERROR] key={key} depth={depth} err={e}")
+                    except Exception as e:
+                        logger.error(f"[ERROR] key={key} depth={depth} err={e}")
+
+                if interrupted:
+                    break
+        except KeyboardInterrupt:
+            interrupted = True
+            maybe_save_checkpoint(force=True)
+            logger.info("[INTERRUPTED] Checkpoint saved. Re-run with --resume to continue.")
+
+        if not interrupted and not queue and hasattr(self.store, "clear_bfs_checkpoint"):
+            self.store.clear_bfs_checkpoint(seed_key, self.max_depth, self.min_year)
+            logger.info("BFS complete; checkpoint cleared.")
 
         # Count eligible nodes (excluding seed) based on reached keys
         for k in seen:

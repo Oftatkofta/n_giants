@@ -119,6 +119,17 @@ def main() -> None:
         default=8,
         help="SQLite memory-map size in GB. Set to 0 to disable mmap. Use higher values (e.g. 80) if you have plenty of RAM.",
     )
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an interrupted BFS run from the last checkpoint in the SQLite DB.",
+    )
+    ap.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=300,
+        help="Seconds between automatic BFS checkpoint saves (default: 300).",
+    )
 
     args = ap.parse_args()
 
@@ -152,7 +163,12 @@ def main() -> None:
 
     if args.mode == "bfs":
         use_batch = args.batch_size > 0
-        metrics = t.run(seed_key, use_batch=use_batch)
+        metrics = t.run(
+            seed_key,
+            use_batch=use_batch,
+            resume=args.resume,
+            checkpoint_interval_sec=float(args.checkpoint_interval),
+        )
         logging.info("=== RUN COMPLETE (BFS) ===")
         logging.info("Seed DOI: %s", args.doi)
         logging.info("Seed key: %s", seed_key)
