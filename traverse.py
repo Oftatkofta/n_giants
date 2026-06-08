@@ -529,12 +529,13 @@ class Traverser:
         use_batch: bool = True,
         resume: bool = False,
         checkpoint_interval_sec: float = 0.0,
+        max_seen: int = 50_000_000,
     ) -> Metrics:
         metrics = Metrics()
         processed = 0
         last_print = time.time()
         max_depth_seen = 0
-        max_seen = 50_000_000
+        stopped_max_seen = False
         new_since_print = 0
         batch_fetched = 0
         last_checkpoint = time.time()
@@ -659,9 +660,14 @@ class Traverser:
                         max_depth_seen = depth
                     processed += 1
 
-                    if len(seen) >= max_seen:
-                        logger.info(f"[STOP] reached max_seen={max_seen}")
-                        queue.clear()
+                    if max_seen > 0 and len(seen) >= max_seen:
+                        logger.info(
+                            "[STOP] reached max_seen=%s (queue=%s). "
+                            "Re-run with --resume and a higher --max-seen to continue.",
+                            max_seen,
+                            len(queue),
+                        )
+                        stopped_max_seen = True
                         break
 
                     if processed % 10000 == 0 or (time.time() - last_print) > 5:
@@ -710,20 +716,25 @@ class Traverser:
                     except Exception as e:
                         logger.error(f"[ERROR] key={key} depth={depth} err={e}")
 
-                if interrupted:
+                if interrupted or stopped_max_seen:
                     break
         except KeyboardInterrupt:
             interrupted = True
         finally:
             signal.signal(signal.SIGINT, prev_handler)
 
-        if interrupted and interrupt_save:
+        if (interrupted and interrupt_save) or stopped_max_seen:
             maybe_save_checkpoint(force=True)
-            logger.info("[INTERRUPTED] Checkpoint saved to sidecar files. Re-run with --resume to continue.")
+            if stopped_max_seen:
+                logger.info(
+                    "[MAX_SEEN] Checkpoint saved. Re-run with --resume --max-seen <higher> to continue."
+                )
+            else:
+                logger.info("[INTERRUPTED] Checkpoint saved to sidecar files. Re-run with --resume to continue.")
         elif interrupted:
             logger.info("[INTERRUPTED] Exited without saving checkpoint.")
 
-        if not interrupted and not queue:
+        if not interrupted and not stopped_max_seen and not queue:
             checkpoint.close_journal()
             checkpoint.clear_run(seed_key, self.max_depth, self.min_year, legacy_store=self.store)
             logger.info("BFS complete; checkpoint cleared.")

@@ -133,6 +133,15 @@ def main() -> None:
             "Checkpoints are always saved on Ctrl+C. Large queues make periodic saves very expensive."
         ),
     )
+    ap.add_argument(
+        "--max-seen",
+        type=int,
+        default=50_000_000,
+        help=(
+            "Stop BFS after discovering this many unique works (default: 50000000). "
+            "Set to 0 for no limit."
+        ),
+    )
 
     args = ap.parse_args()
 
@@ -169,12 +178,18 @@ def main() -> None:
 
     if args.mode == "bfs":
         use_batch = args.batch_size > 0
-        logging.info("Starting BFS traversal (batch_size=%s, resume=%s)", args.batch_size, args.resume)
+        logging.info(
+            "Starting BFS traversal (batch_size=%s, resume=%s, max_seen=%s)",
+            args.batch_size,
+            args.resume,
+            args.max_seen or "unlimited",
+        )
         metrics = t.run(
             seed_key,
             use_batch=use_batch,
             resume=args.resume,
             checkpoint_interval_sec=float(args.checkpoint_interval),
+            max_seen=args.max_seen,
         )
         logging.info("=== RUN COMPLETE (BFS) ===")
         logging.info("Seed DOI: %s", args.doi)
